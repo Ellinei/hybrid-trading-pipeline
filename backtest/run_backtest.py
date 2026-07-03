@@ -17,7 +17,7 @@ import structlog
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-from backtest.engine import BacktestConfig, BacktestResult, run_backtest
+from backtest.engine import BacktestConfig, BacktestResult, _load_all_features, run_backtest
 from backtest.exit_simulation import OHLCVBar
 from execution.exchange_filters import parse_symbol_filters
 from execution.risk_manager import RiskConfig
@@ -98,6 +98,10 @@ def main() -> None:
     parser.add_argument("--end", type=str, default=None,
                          help="ISO date (default: latest available data per symbol)")
     parser.add_argument("--output", type=str, default=None, help="Optional CSV path for the trade log")
+    parser.add_argument("--walk-forward", type=int, default=0, metavar="MONTHS",
+                         help="Enable walk-forward ML retraining every N months (0=disabled)")
+    parser.add_argument("--min-train-days", type=int, default=60,
+                         help="Warm-up days before first model fit in walk-forward mode (default: 60)")
     args = parser.parse_args()
 
     load_dotenv()
@@ -141,12 +145,27 @@ def main() -> None:
         risk_config=RiskConfig(),
     )
 
+    walk_forward = args.walk_forward
+    min_train_days = args.min_train_days
+    feature_df = None
+
+    if walk_forward > 0:
+        print(f"\n  Walk-forward mode: ML retrain every {walk_forward} month(s), "
+              f"warm-up {min_train_days} day(s)")
+        print("  Pre-loading feature data for walk-forward…", flush=True)
+        feature_df = _load_all_features(engine, symbols)
+        print(f"  Loaded {len(feature_df)} feature rows across {len(symbols)} symbol(s).")
+
     result = run_backtest(
         bars_by_symbol=bars_by_symbol,
         atr_by_symbol=atr_by_symbol,
         filters_by_symbol=filters_by_symbol,
         aggregator=aggregator,
         config=config,
+        walk_forward_months=walk_forward,
+        min_train_days=min_train_days,
+        feature_df=feature_df,
+        db_engine=engine,
     )
 
     _print_report(symbols, result)

@@ -10,8 +10,9 @@ circuit breaker.
 """
 from __future__ import annotations
 
+import structlog
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from backtest.exit_simulation import (
     OHLCVBar,
@@ -26,6 +27,8 @@ from execution.exchange_filters import FilterViolation, SymbolFilters, round_qty
 from execution.risk_manager import RiskConfig
 from signals.base import SignalDirection
 
+log = structlog.get_logger()
+
 _ML_LOOKAHEAD_WARNING = (
     "ML signal model was trained on an 80/20 split of this SAME history — "
     "most backtest bars are in-sample (training-on-test), a strong "
@@ -33,6 +36,46 @@ _ML_LOOKAHEAD_WARNING = (
     "(Phase 8.5) would likely show worse performance than reported here."
 )
 _DEFAULT_PERIODS_PER_YEAR = 24 * 365  # hourly bars, matches the live pipeline's 1h interval
+
+
+def _load_all_features(db_engine, symbols: list[str]):
+    """Pre-load all feat_technical rows + computed target column for walk-forward.
+
+    Queries the DB once per symbol (avoids N×retraining-boundary queries).
+    Returns a pandas DataFrame sorted by (symbol, timestamp) with an added
+    'target' column: 1 if close rises from this bar to the next (per symbol).
+    Last row per symbol is dropped (no known target).
+    """
+    import pandas as pd
+    from sqlalchemy import text
+    from signals.ml_model import MLSignalGenerator
+
+    feat_cols = MLSignalGenerator.FEATURES
+    select_cols = ", ".join(["symbol", "timestamp", "close"] + feat_cols)
+
+    frames = []
+    for symbol in symbols:
+        query = text(
+            f"SELECT {select_cols} FROM features.feat_technical"
+            " WHERE symbol = :symbol ORDER BY timestamp ASC"
+        )
+        with db_engine.connect() as conn:
+            result = conn.execute(query, {"symbol": symbol})
+            df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+        if not df.empty:
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    full = pd.concat(frames, ignore_index=True).sort_values(["symbol", "timestamp"])
+    # Ensure timestamps are UTC-aware for comparison with bar timestamps
+    if not full["timestamp"].dt.tz:
+        full["timestamp"] = full["timestamp"].dt.tz_localize("UTC")
+    full["next_close"] = full.groupby("symbol")["close"].shift(-1)
+    full["target"] = (full["next_close"] > full["close"]).astype(int)
+    full = full.dropna(subset=["next_close"])
+    return full.reset_index(drop=True)
 
 
 @dataclass
@@ -141,17 +184,37 @@ def run_backtest(
     filters_by_symbol: dict[str, SymbolFilters],
     aggregator,
     config: BacktestConfig,
+    walk_forward_months: int = 0,
+    min_train_days: int = 60,
+    feature_df=None,
+    db_engine=None,
 ) -> BacktestResult:
     """Replay historical bars through the live signal/risk/fill logic.
 
     *aggregator* must expose aggregate(symbol, as_of) -> AggregatedSignal —
     in production this is the real SignalAggregator(db_engine); in tests it
     can be any fake with that interface.
+
+    When *walk_forward_months* > 0, the ML model is retrained in-memory at
+    each monthly boundary using only data that existed up to that point,
+    making all post-warm-up ML signals genuinely out-of-sample.
     """
+    import pandas as pd
+
     state = BacktestState(balance=config.initial_balance)
     risk = SimulatedRiskManager(
         state, initial_balance=config.initial_balance, config=config.risk_config
     )
+
+    # Walk-forward setup
+    ml_gen = getattr(aggregator, "ml", None)
+    next_retrain_at: datetime | None = None
+    wf_active = walk_forward_months > 0 and ml_gen is not None
+
+    if wf_active:
+        if feature_df is None and db_engine is not None:
+            feature_df = _load_all_features(db_engine, config.symbols)
+        ml_gen.set_walk_forward_mode(True)
 
     # All symbols share one balance/position-count/drawdown state, so bars
     # MUST be walked in one global chronological stream — never all of one
@@ -168,6 +231,20 @@ def run_backtest(
     )
 
     for timestamp, symbol, bar in merged:
+        # Walk-forward: trigger retraining at each monthly boundary
+        if wf_active and feature_df is not None and len(feature_df):
+            if next_retrain_at is None:
+                next_retrain_at = timestamp + timedelta(days=min_train_days)
+            if timestamp >= next_retrain_at:
+                slice_df = feature_df[
+                    feature_df["timestamp"] < pd.Timestamp(timestamp)
+                ].copy()
+                if ml_gen.train_in_memory(slice_df):
+                    log.info("walk_forward_retrained",
+                             at=str(timestamp), rows=len(slice_df))
+                else:
+                    log.warning("walk_forward_retrain_skipped", at=str(timestamp))
+                next_retrain_at = timestamp + timedelta(days=30 * walk_forward_months)
         atr_lookup = atr_by_symbol.get(symbol, {})
         filters = filters_by_symbol.get(symbol)
 
@@ -207,9 +284,18 @@ def run_backtest(
         "trade_count": len(state.closed_trades),
     }
 
+    if wf_active:
+        warning = (
+            f"Walk-forward mode: ML model retrained every {walk_forward_months} "
+            f"month(s) with {min_train_days}-day warm-up. "
+            "All post-warm-up ML signals are out-of-sample."
+        )
+    else:
+        warning = _ML_LOOKAHEAD_WARNING
+
     return BacktestResult(
         trades=state.closed_trades,
         equity_curve=state.equity_curve,
         metrics=metrics,
-        warnings=[_ML_LOOKAHEAD_WARNING],
+        warnings=[warning],
     )

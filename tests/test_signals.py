@@ -220,6 +220,55 @@ class TestMLSignal:
         assert signal.confidence == pytest.approx(0.5)
         assert signal.source     == "ml"
 
+    def test_walk_forward_mode_returns_hold_during_warmup(self):
+        """set_walk_forward_mode(True) + no in-memory model → HOLD with warmup reason."""
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        gen.set_walk_forward_mode(True)
+
+        signal = gen.generate_signal("BTCUSDT")
+
+        assert signal.direction == SignalDirection.HOLD
+        assert signal.metadata.get("reason") == "walk_forward_warmup"
+
+    def test_train_in_memory_insufficient_data_returns_false(self):
+        """3-row DataFrame (< n_splits+1=6) → False; model stays None."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        df = pd.DataFrame(
+            np.zeros((3, len(MLSignalGenerator.FEATURES) + 1)),
+            columns=MLSignalGenerator.FEATURES + ["target"],
+        )
+        df["target"] = [0, 1, 0]
+
+        assert gen.train_in_memory(df) is False
+        assert gen.is_trained_in_memory() is False
+
+    def test_train_in_memory_smoke(self):
+        """200 synthetic rows → True; in-memory model and scaler are set."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+
+        result = gen.train_in_memory(df)
+
+        assert result is True
+        assert gen.is_trained_in_memory() is True
+        assert gen.model is not None
+        assert gen.scaler is not None
+
 
 # ===========================================================================
 # 4b. ML signal — as_of historical cutoff (for backtesting)

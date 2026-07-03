@@ -8,7 +8,9 @@ Run:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 
 from backtest.engine import BacktestConfig, run_backtest
@@ -136,3 +138,92 @@ class TestRunBacktestMultiSymbolChronologicalOrder:
         )
         assert result.trades == []
         assert result.metrics["trade_count"] == 0
+
+
+# ===========================================================================
+# Walk-forward retraining tests
+# ===========================================================================
+
+class _HoldAggregatorWithML:
+    """Always returns HOLD; exposes a mock ml attribute for walk-forward tests."""
+
+    def __init__(self, ml_mock):
+        self.ml = ml_mock
+
+    def aggregate(self, symbol: str, as_of=None) -> AggregatedSignal:
+        return AggregatedSignal(
+            direction=SignalDirection.HOLD, confidence=0.5, symbol=symbol,
+            timestamp=as_of or datetime.now(timezone.utc),
+            signals=[], reasoning="hold", weights_used={},
+        )
+
+
+class TestWalkForwardMode:
+
+    def test_walk_forward_retraining_boundary_calls_train_in_memory(self):
+        """With 91 bars at 1-day intervals, 30-day warm-up, monthly retraining:
+        train_in_memory fires at day-30 and day-60 boundaries (≥ 2 calls)."""
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars = [
+            OHLCVBar(
+                timestamp=start + timedelta(days=d),
+                open=100.0, high=101.0, low=99.0, close=100.0,
+            )
+            for d in range(91)
+        ]
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+        )
+        atr_by_symbol = {"BTCUSDT": {b.timestamp: 5.0 for b in bars}}
+
+        mock_ml = MagicMock()
+        mock_ml.train_in_memory.return_value = True
+
+        feature_df = pd.DataFrame({
+            "timestamp": [start + timedelta(days=d) for d in range(91)],
+        })
+
+        result = run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol=atr_by_symbol,
+            filters_by_symbol={},
+            aggregator=_HoldAggregatorWithML(mock_ml),
+            config=config,
+            walk_forward_months=1,
+            min_train_days=30,
+            feature_df=feature_df,
+        )
+
+        mock_ml.set_walk_forward_mode.assert_called_once_with(True)
+        assert mock_ml.train_in_memory.call_count >= 2
+
+    def test_walk_forward_warning_replaces_lookahead_warning(self):
+        """Walk-forward result carries an OOS warning, not the in-sample warning."""
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars = [
+            OHLCVBar(timestamp=start + timedelta(hours=h),
+                     open=100.0, high=101.0, low=99.0, close=100.0)
+            for h in range(5)
+        ]
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+        )
+        mock_ml = MagicMock()
+        mock_ml.train_in_memory.return_value = False
+        feature_df = pd.DataFrame({"timestamp": [b.timestamp for b in bars]})
+
+        result = run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+            filters_by_symbol={},
+            aggregator=_HoldAggregatorWithML(mock_ml),
+            config=config,
+            walk_forward_months=1,
+            min_train_days=30,
+            feature_df=feature_df,
+        )
+
+        assert any("out-of-sample" in w for w in result.warnings)
+        assert not any("training-on-test" in w for w in result.warnings)

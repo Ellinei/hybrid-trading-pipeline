@@ -218,15 +218,87 @@ class MLSignalGenerator:
             row = conn.execute(query, params).fetchone()
         return dict(row._mapping) if row else None
 
+    # ------------------------------------------------------------------
+    # Walk-forward in-memory training
+    # ------------------------------------------------------------------
+
+    def set_walk_forward_mode(self, enabled: bool) -> None:
+        """When True, generate_signal uses only the in-memory model.
+        During warm-up (before first train_in_memory call), returns HOLD
+        instead of falling back to the disk-based model."""
+        self._walk_forward_mode = enabled
+
+    def is_trained_in_memory(self) -> bool:
+        return getattr(self, "_trained_in_memory", False) and self.model is not None
+
+    def train_in_memory(self, df: pd.DataFrame) -> bool:
+        """Train on a pre-loaded feature DataFrame without writing to disk.
+
+        df must contain self.FEATURES columns plus 'target'.
+        Returns True on success, False if df has insufficient rows for CV
+        (requires n_splits+1 = 6 minimum) or missing columns.
+        """
+        n_splits = 5
+        required = self.FEATURES + ["target"]
+        if not all(c in df.columns for c in required):
+            missing = [c for c in required if c not in df.columns]
+            log.warning("train_in_memory_missing_columns", missing=missing)
+            return False
+
+        data = df[required].dropna()
+        if len(data) < n_splits + 1:
+            log.warning("train_in_memory_insufficient_data",
+                        rows=len(data), required=n_splits + 1)
+            return False
+
+        X = data[self.FEATURES].values
+        y = data["target"].to_numpy()
+
+        pipe = Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", XGBClassifier(eval_metric="logloss", random_state=42)),
+        ])
+        param_grid = {
+            "clf__max_depth":     [3, 4],
+            "clf__n_estimators":  [100, 200],
+            "clf__learning_rate": [0.05, 0.1],
+        }
+        grid = GridSearchCV(
+            pipe, param_grid,
+            cv=TimeSeriesSplit(n_splits=n_splits),
+            scoring="accuracy",
+            refit=True,
+            n_jobs=-1,
+        )
+        try:
+            grid.fit(X, y)
+        except Exception as exc:
+            log.warning("train_in_memory_failed", error=str(exc))
+            return False
+
+        self.scaler = grid.best_estimator_.named_steps["scaler"]
+        self.model  = grid.best_estimator_.named_steps["clf"]
+        self._trained_in_memory = True
+        log.info("train_in_memory_complete", rows=len(data),
+                 best_params=grid.best_params_)
+        return True
+
     def generate_signal(self, symbol: str, as_of: datetime | None = None) -> Signal:
         now = as_of if as_of is not None else datetime.now(timezone.utc)
 
-        if self.model is None and not self.load_model():
-            return Signal(
-                direction=SignalDirection.HOLD, confidence=0.5,
-                source="ml", symbol=symbol, timestamp=now,
-                metadata={"reason": "model_not_trained"},
-            )
+        if self.model is None:
+            if getattr(self, "_walk_forward_mode", False):
+                return Signal(
+                    direction=SignalDirection.HOLD, confidence=0.5,
+                    source="ml", symbol=symbol, timestamp=now,
+                    metadata={"reason": "walk_forward_warmup"},
+                )
+            if not self.load_model():
+                return Signal(
+                    direction=SignalDirection.HOLD, confidence=0.5,
+                    source="ml", symbol=symbol, timestamp=now,
+                    metadata={"reason": "model_not_trained"},
+                )
 
         features = self.get_latest_features(symbol, as_of=as_of)
 

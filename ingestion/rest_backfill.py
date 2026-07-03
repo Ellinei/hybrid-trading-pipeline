@@ -112,6 +112,7 @@ def backfill_symbol(
     symbol: str,
     days: int = 90,
     interval: str = "1h",
+    no_incremental: bool = False,
 ) -> int:
     """Fetch and insert all missing candles for one symbol.
 
@@ -120,7 +121,7 @@ def backfill_symbol(
     bound_log = log.bind(symbol=symbol, interval=interval)
 
     latest = _get_latest_timestamp(conn, symbol)
-    if latest:
+    if latest and not no_incremental:
         # Advance 1 ms past the last stored candle to avoid re-fetching it
         chunk_start: datetime = latest + timedelta(milliseconds=1)
         bound_log.info("incremental_backfill", from_ts=str(chunk_start))
@@ -166,6 +167,7 @@ def run_backfill(
     symbols: list[str],
     days: int = 90,
     interval: str = "1h",
+    no_incremental: bool = False,
 ) -> None:
     """Orchestrate full backfill: init DB, iterate symbols, print summary."""
     from sqlalchemy import create_engine
@@ -204,7 +206,8 @@ def run_backfill(
         for symbol in symbols:
             try:
                 inserted = backfill_symbol(
-                    conn, client, symbol, days=days, interval=interval
+                    conn, client, symbol, days=days, interval=interval,
+                    no_incremental=no_incremental,
                 )
                 with conn.cursor() as cur:
                     cur.execute(
@@ -261,6 +264,14 @@ if __name__ == "__main__":
         default="1h",
         help="Candle interval, e.g. 1m, 5m, 15m, 1h, 4h, 1d (default: 1h)",
     )
+    parser.add_argument(
+        "--no-incremental",
+        action="store_true",
+        default=False,
+        help="Ignore existing data and backfill from now−days, re-inserting "
+             "older bars (safe: ON CONFLICT DO NOTHING; use with --days 180 "
+             "to extend an existing 90-day dataset backwards)",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -271,4 +282,7 @@ if __name__ == "__main__":
         env_syms = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
         target_symbols = [s.strip() for s in env_syms.split(",") if s.strip()]
 
-    run_backfill(symbols=target_symbols, days=args.days, interval=args.interval)
+    run_backfill(
+        symbols=target_symbols, days=args.days, interval=args.interval,
+        no_incremental=args.no_incremental,
+    )
