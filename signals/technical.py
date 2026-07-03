@@ -90,7 +90,10 @@ class TechnicalSignalGenerator:
             )
 
         # ── Strong BUY ──────────────────────────────────────────────
-        if rsi < 30 and macd > 0:
+        # pct_1h > 0 guards against falling-knife entries: RSI<30 in crypto
+        # historically precedes multi-month consolidation, not V-reversals.
+        # Require positive 1h momentum to confirm the dip is already bouncing.
+        if rsi < 30 and macd > 0 and pct_1h > 0:
             return sig(SignalDirection.BUY, 0.8)
         if bz < -2.0:
             return sig(SignalDirection.BUY, 0.75)

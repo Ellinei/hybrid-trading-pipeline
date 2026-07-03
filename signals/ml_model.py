@@ -117,7 +117,7 @@ class MLSignalGenerator:
             ("clf", XGBClassifier(eval_metric="logloss", random_state=42)),
         ])
         param_grid = {
-            "clf__max_depth":     [3, 4, 5],
+            "clf__max_depth":     [3, 4],
             "clf__n_estimators":  [100, 200],
             "clf__learning_rate": [0.05, 0.1],
         }

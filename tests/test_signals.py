@@ -77,10 +77,10 @@ class TestTechnicalSignals:
 
     @patch("signals.technical.TechnicalSignalGenerator.get_latest_features")
     def test_technical_buy_signal(self, mock_feat):
-        """RSI < 30 AND MACD > 0 → strong BUY, confidence 0.8."""
+        """RSI < 30 AND MACD > 0 AND pct_1h > 0 → strong BUY, confidence 0.8."""
         from signals.technical import TechnicalSignalGenerator
 
-        mock_feat.return_value = _features(rsi_14_proxy=25.0, macd_line=0.5)
+        mock_feat.return_value = _features(rsi_14_proxy=25.0, macd_line=0.5, pct_change_1h=0.01)
         signal = TechnicalSignalGenerator(MagicMock()).generate_signal("BTCUSDT")
 
         assert signal.direction  == SignalDirection.BUY
@@ -133,14 +133,27 @@ class TestTechnicalSignals:
     @patch("signals.technical.TechnicalSignalGenerator.get_latest_features")
     def test_rsi_zero_is_not_replaced_by_default_and_triggers_buy(self, mock_feat):
         """RSI=0.0 is extreme oversold (valid value). Must not be replaced by 50.0
-        via a falsy `or` default — doing so would silently drop a strong BUY signal."""
+        via a falsy `or` default. With positive 1h momentum confirming the bounce,
+        it must fire BUY (falling-knife guard requires pct_1h > 0)."""
         from signals.technical import TechnicalSignalGenerator
 
-        mock_feat.return_value = _features(rsi_14_proxy=0.0, macd_line=0.1)
+        mock_feat.return_value = _features(rsi_14_proxy=0.0, macd_line=0.1, pct_change_1h=0.01)
         signal = TechnicalSignalGenerator(MagicMock()).generate_signal("BTCUSDT")
 
         assert signal.direction  == SignalDirection.BUY
         assert signal.confidence == pytest.approx(0.8)
+
+    @patch("signals.technical.TechnicalSignalGenerator.get_latest_features")
+    def test_rsi_oversold_without_momentum_is_hold(self, mock_feat):
+        """RSI<30 + MACD positive but pct_1h <= 0 → HOLD.
+        Falling-knife guard: crypto RSI<30 without price already ticking up
+        historically precedes consolidation, not a V-reversal."""
+        from signals.technical import TechnicalSignalGenerator
+
+        mock_feat.return_value = _features(rsi_14_proxy=20.0, macd_line=0.1, pct_change_1h=0.0)
+        signal = TechnicalSignalGenerator(MagicMock()).generate_signal("BTCUSDT")
+
+        assert signal.direction == SignalDirection.HOLD
 
 
 # ===========================================================================
