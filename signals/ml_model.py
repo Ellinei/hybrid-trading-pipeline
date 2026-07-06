@@ -1,7 +1,11 @@
-"""XGBoost next-hour direction predictor.
+"""XGBoost k-bar forward-return predictor.
 
-Trains on ``features.feat_technical`` and predicts whether the next-hour
-close will be higher than the current close (binary classification).
+Trains on ``features.feat_technical`` and predicts whether the close
+LABEL_HORIZON_BARS ahead exceeds the current close by more than
+LABEL_MIN_RETURN (binary classification). The horizon matches the
+strategy's observed median hold time and the minimum return matches the
+round-trip fee+slippage cost, so a positive label means a move worth
+trading, not next-bar noise.
 
 Usage:
     python -m signals.ml_model   # train and print metrics
@@ -28,10 +32,15 @@ log = structlog.get_logger()
 
 
 class MLSignalGenerator:
-    """XGBoost classifier: predicts next-hour price direction."""
+    """XGBoost classifier: predicts k-bar forward return above cost."""
 
     MODEL_PATH  = "models/xgboost_signal.pkl"
     SCALER_PATH = "models/scaler.pkl"
+
+    # Label definition — single source of truth, shared with the backtest
+    # engine's _load_all_features so the two target computations can't drift.
+    LABEL_HORIZON_BARS = 8     # ≈ observed median hold time on 1h bars
+    LABEL_MIN_RETURN   = 0.003 # ≈ round-trip fees + slippage
 
     FEATURES = [
         # Original momentum/volatility features
@@ -50,18 +59,37 @@ class MLSignalGenerator:
         "candle_body_pct", "upper_wick_pct", "stoch_k",
     ]
 
-    def __init__(self, db_engine) -> None:
+    def __init__(
+        self,
+        db_engine,
+        buy_prob_threshold: float = 0.65,
+        sell_prob_threshold: float = 0.35,
+    ) -> None:
         self.engine = db_engine
         self.model:  XGBClassifier   | None = None
         self.scaler: StandardScaler  | None = None
+        self.buy_prob_threshold = buy_prob_threshold
+        self.sell_prob_threshold = sell_prob_threshold
 
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
 
+    @classmethod
+    def compute_target(cls, close: pd.Series, future_close: pd.Series) -> pd.Series:
+        """Vectorized label: 1 when the k-bar forward net return strictly
+        exceeds LABEL_MIN_RETURN. Shared by SQL-path training and the
+        backtest engine's feature pre-loader so the two can't drift.
+
+        Postgres numeric columns arrive as Decimal, which can't mix with
+        float arithmetic — coerce both series first."""
+        close = close.astype(float)
+        future_close = future_close.astype(float)
+        return (future_close / close - 1.0 > cls.LABEL_MIN_RETURN).astype(int)
+
     def load_training_data(self, symbol: str, min_rows: int = 200) -> pd.DataFrame:
-        """Load features + next-hour target from the feature table."""
-        query = text("""
+        """Load features + k-bar forward-return target from the feature table."""
+        query = text(f"""
             SELECT
                 rsi_14_proxy, macd_line, bb_zscore,
                 pct_change_1h, pct_change_24h, log_return_1h,
@@ -72,7 +100,9 @@ class MLSignalGenerator:
                 vol_ma_ratio,
                 candle_body_pct, upper_wick_pct, stoch_k,
                 close,
-                LEAD(close, 1) OVER (PARTITION BY symbol ORDER BY timestamp) AS next_close
+                LEAD(close, {int(self.LABEL_HORIZON_BARS)}) OVER (
+                    PARTITION BY symbol ORDER BY timestamp
+                ) AS future_close
             FROM features.feat_technical
             WHERE symbol = :symbol
             ORDER BY timestamp
@@ -82,8 +112,8 @@ class MLSignalGenerator:
             rows   = result.fetchall()
             df     = pd.DataFrame(rows, columns=list(result.keys()))
 
-        df = df.dropna(subset=["next_close"])
-        df["target"] = (df["next_close"] > df["close"]).astype(int)
+        df = df.dropna(subset=["future_close"])
+        df["target"] = self.compute_target(df["close"], df["future_close"])
         df = df.dropna(subset=self.FEATURES + ["target"])
 
         if len(df) < min_rows:
@@ -121,11 +151,14 @@ class MLSignalGenerator:
             "clf__n_estimators":  [100, 200],
             "clf__learning_rate": [0.05, 0.1],
         }
-        # 12 combos × 5 folds = 60 fits; typically finishes in < 2 minutes.
+        # 8 combos × 5 folds = 40 fits; typically finishes in < 2 minutes.
+        # roc_auc, not accuracy: the cost-aware label is imbalanced (only
+        # ~35-45% of bars clear the +0.3% hurdle), so accuracy rewards
+        # always-predict-negative models.
         grid = GridSearchCV(
             pipe, param_grid,
             cv=TimeSeriesSplit(n_splits=5),
-            scoring="accuracy",
+            scoring="roc_auc",
             refit=True,
             n_jobs=-1,
         )
@@ -266,7 +299,7 @@ class MLSignalGenerator:
         grid = GridSearchCV(
             pipe, param_grid,
             cv=TimeSeriesSplit(n_splits=n_splits),
-            scoring="accuracy",
+            scoring="roc_auc",
             refit=True,
             n_jobs=-1,
         )
@@ -322,9 +355,9 @@ class MLSignalGenerator:
         X = self.scaler.transform([feat_values])
         prob_up = float(self.model.predict_proba(X)[0][1])
 
-        if prob_up > 0.65:
+        if prob_up > self.buy_prob_threshold:
             direction, confidence = SignalDirection.BUY,  prob_up
-        elif prob_up < 0.35:
+        elif prob_up < self.sell_prob_threshold:
             direction, confidence = SignalDirection.SELL, 1.0 - prob_up
         else:
             direction, confidence = SignalDirection.HOLD, 0.5

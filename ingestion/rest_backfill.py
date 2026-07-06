@@ -168,6 +168,7 @@ def run_backfill(
     days: int = 90,
     interval: str = "1h",
     no_incremental: bool = False,
+    source: str = "mainnet",
 ) -> None:
     """Orchestrate full backfill: init DB, iterate symbols, print summary."""
     from sqlalchemy import create_engine
@@ -198,7 +199,9 @@ def run_backfill(
     finally:
         engine.dispose()
 
-    client = BinanceClientWrapper()
+    # Market data comes from mainnet by default (real prices, full history,
+    # no API key needed); order execution elsewhere stays on testnet.
+    client = BinanceClientWrapper(testnet=(source == "testnet"))
     conn = _get_db_connection()
     summary: dict[str, dict[str, int]] = {}
 
@@ -272,6 +275,13 @@ if __name__ == "__main__":
              "older bars (safe: ON CONFLICT DO NOTHING; use with --days 180 "
              "to extend an existing 90-day dataset backwards)",
     )
+    parser.add_argument(
+        "--source",
+        choices=["mainnet", "testnet"],
+        default="mainnet",
+        help="Market-data source (default: mainnet — public klines, no key "
+             "needed, years of history; testnet only keeps legacy behavior)",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -284,5 +294,5 @@ if __name__ == "__main__":
 
     run_backfill(
         symbols=target_symbols, days=args.days, interval=args.interval,
-        no_incremental=args.no_incremental,
+        no_incremental=args.no_incremental, source=args.source,
     )

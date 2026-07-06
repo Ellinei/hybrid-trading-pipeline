@@ -10,7 +10,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backtest.metrics import (
+    exit_reason_breakdown,
+    expectancy,
+    holding_hours_stats,
     max_drawdown,
+    per_window_metrics,
     profit_factor,
     sharpe_ratio,
     total_return,
@@ -79,6 +83,71 @@ class TestTotalReturn:
 
     def test_single_point_returns_zero(self):
         assert total_return(_equity_curve([1000.0])) == 0.0
+
+
+class TestExpectancy:
+    def test_mean_pnl_per_trade(self):
+        trades = [{"pnl": 10.0}, {"pnl": -5.0}, {"pnl": 25.0}]
+        assert expectancy(trades) == pytest.approx(10.0)
+
+    def test_no_trades_returns_zero(self):
+        assert expectancy([]) == 0.0
+
+
+class TestExitReasonBreakdown:
+    def test_counts_per_reason(self):
+        trades = [
+            {"reason": "signal_close"}, {"reason": "stop_loss"},
+            {"reason": "signal_close"}, {},
+        ]
+        assert exit_reason_breakdown(trades) == {
+            "signal_close": 2, "stop_loss": 1, "unknown": 1,
+        }
+
+    def test_no_trades_returns_empty(self):
+        assert exit_reason_breakdown([]) == {}
+
+
+class TestHoldingHoursStats:
+    def test_median_mean_p90(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        trades = [
+            {"entry_time": start, "exit_time": start + timedelta(hours=h)}
+            for h in (2.0, 4.0, 6.0, 8.0, 20.0)
+        ]
+        stats = holding_hours_stats(trades)
+        assert stats["median"] == pytest.approx(6.0)
+        assert stats["mean"] == pytest.approx(8.0)
+        assert stats["p90"] == pytest.approx(20.0)
+
+    def test_no_trades_returns_zeros(self):
+        assert holding_hours_stats([]) == {"median": 0.0, "mean": 0.0, "p90": 0.0}
+
+
+class TestPerWindowMetrics:
+    def test_trades_bucketed_by_entry_time(self):
+        b0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        b1 = b0 + timedelta(days=30)
+        trades = [
+            # warm-up trade — excluded
+            {"entry_time": b0 - timedelta(hours=1), "pnl": 99.0},
+            # window 0: one win, one loss
+            {"entry_time": b0, "pnl": 10.0},
+            {"entry_time": b0 + timedelta(days=1), "pnl": -5.0},
+            # window 1 (open-ended): one win
+            {"entry_time": b1 + timedelta(hours=1), "pnl": 7.0},
+        ]
+        windows = per_window_metrics(trades, [b0, b1])
+        assert len(windows) == 2
+        assert windows[0]["trade_count"] == 2
+        assert windows[0]["pnl"] == pytest.approx(5.0)
+        assert windows[0]["profit_factor"] == pytest.approx(2.0)
+        assert windows[0]["win_rate"] == pytest.approx(0.5)
+        assert windows[1]["trade_count"] == 1
+        assert windows[1]["window_end"] is None
+
+    def test_no_boundaries_returns_empty(self):
+        assert per_window_metrics([{"entry_time": datetime.now(timezone.utc), "pnl": 1.0}], []) == []
 
 
 class TestSharpeRatio:

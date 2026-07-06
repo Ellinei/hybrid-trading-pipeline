@@ -140,6 +140,70 @@ class TestRunBacktestMultiSymbolChronologicalOrder:
         assert result.metrics["trade_count"] == 0
 
 
+class TestTimeStop:
+    def test_time_stop_closes_position_after_max_hold_bars(self):
+        """max_hold_bars=2: BUY on bar0, no SL/TP touch, forced close at bar2."""
+        bars = _bars([(100.0, 101.0, 99.0)] * 5)
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+            risk_config=RiskConfig(min_confidence=0.0, max_hold_bars=2),
+        )
+        result = run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+            filters_by_symbol={},
+            aggregator=_FakeAggregator(),
+            config=config,
+        )
+
+        assert len(result.trades) == 1
+        trade = result.trades[0]
+        assert trade["reason"] == "time_stop"
+        assert trade["exit_time"] - trade["entry_time"] == timedelta(hours=2)
+
+    def test_time_stop_disabled_by_default(self):
+        """max_hold_bars=0 (default): position stays open to the end."""
+        bars = _bars([(100.0, 101.0, 99.0)] * 5)
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+            risk_config=RiskConfig(min_confidence=0.0),
+        )
+        result = run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+            filters_by_symbol={},
+            aggregator=_FakeAggregator(),
+            config=config,
+        )
+
+        assert result.trades == []
+
+    def test_stop_loss_takes_priority_over_time_stop(self):
+        """A bar that both breaches the SL and exceeds max hold closes as stop_loss."""
+        bars = _bars([
+            (100.0, 101.0, 99.0),
+            (100.0, 101.0, 99.0),
+            (93.0, 95.0, 90.0),  # SL 92.5 hit at bar2 == max_hold boundary
+        ])
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+            risk_config=RiskConfig(min_confidence=0.0, max_hold_bars=2),
+        )
+        result = run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+            filters_by_symbol={},
+            aggregator=_FakeAggregator(),
+            config=config,
+        )
+
+        assert len(result.trades) == 1
+        assert result.trades[0]["reason"] == "stop_loss"
+
+
 # ===========================================================================
 # Walk-forward retraining tests
 # ===========================================================================
@@ -197,6 +261,103 @@ class TestWalkForwardMode:
 
         mock_ml.set_walk_forward_mode.assert_called_once_with(True)
         assert mock_ml.train_in_memory.call_count >= 2
+        assert len(result.retrain_events) == mock_ml.train_in_memory.call_count
+        assert all(e["trained"] for e in result.retrain_events)
+        assert all("at" in e and "rows" in e for e in result.retrain_events)
+
+    def test_retrain_slice_excludes_label_horizon(self):
+        """Rows within LABEL_HORIZON_BARS hours of the retrain time have labels
+        that peek past 'now' — the training slice must exclude them."""
+        from signals.ml_model import MLSignalGenerator
+
+        horizon = MLSignalGenerator.LABEL_HORIZON_BARS
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars = [
+            OHLCVBar(timestamp=start + timedelta(hours=h),
+                     open=100.0, high=101.0, low=99.0, close=100.0)
+            for h in range(72)
+        ]
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+        )
+        mock_ml = MagicMock()
+        mock_ml.train_in_memory.return_value = True
+        feature_df = pd.DataFrame({
+            "timestamp": [b.timestamp for b in bars],
+        })
+
+        run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+            filters_by_symbol={},
+            aggregator=_HoldAggregatorWithML(mock_ml),
+            config=config,
+            walk_forward_months=1,
+            min_train_days=1,
+            feature_df=feature_df,
+        )
+
+        # First retrain fires at start+1day; slice must stop 'horizon' hours earlier
+        first_slice = mock_ml.train_in_memory.call_args_list[0][0][0]
+        retrain_time = start + timedelta(days=1)
+        assert first_slice["timestamp"].max() < retrain_time - timedelta(hours=horizon)
+        assert len(first_slice) == 24 - horizon
+
+    def test_train_window_days_caps_slice_to_sliding_window(self):
+        """train_window_days > 0 drops rows older than the sliding window."""
+        from signals.ml_model import MLSignalGenerator
+
+        horizon = MLSignalGenerator.LABEL_HORIZON_BARS
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars = [
+            OHLCVBar(timestamp=start + timedelta(hours=h),
+                     open=100.0, high=101.0, low=99.0, close=100.0)
+            for h in range(120)
+        ]
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+        )
+        mock_ml = MagicMock()
+        mock_ml.train_in_memory.return_value = True
+        feature_df = pd.DataFrame({
+            "timestamp": [b.timestamp for b in bars],
+        })
+
+        run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+            filters_by_symbol={},
+            aggregator=_HoldAggregatorWithML(mock_ml),
+            config=config,
+            walk_forward_months=1,
+            min_train_days=2,
+            feature_df=feature_df,
+            train_window_days=1,
+        )
+
+        # Retrain at start+2d, label cutoff = 2d - horizon, window = 24h before that
+        first_slice = mock_ml.train_in_memory.call_args_list[0][0][0]
+        label_cutoff = start + timedelta(days=2) - timedelta(hours=horizon)
+        assert len(first_slice) == 24
+        assert first_slice["timestamp"].min() == label_cutoff - timedelta(days=1)
+        assert first_slice["timestamp"].max() < label_cutoff
+
+    def test_retrain_events_empty_without_walk_forward(self):
+        bars = _bars([(100.0, 101.0, 99.0), (100.0, 101.0, 99.0)])
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+        )
+        result = run_backtest(
+            bars_by_symbol={"BTCUSDT": bars},
+            atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+            filters_by_symbol={},
+            aggregator=_FakeAggregator(),
+            config=config,
+        )
+        assert result.retrain_events == []
 
     def test_walk_forward_warning_replaces_lookahead_warning(self):
         """Walk-forward result carries an OOS warning, not the in-sample warning."""

@@ -75,6 +75,33 @@ class TestBinanceClientPing:
 
 
 # ===========================================================================
+# 1a. BinanceClientWrapper testnet/mainnet source selection
+# ===========================================================================
+
+class TestClientSourceSelection:
+    """Explicit testnet=False must build a keyless mainnet client — the env
+    keys are testnet credentials and must never reach the live exchange."""
+
+    @patch("ingestion.binance_client.Client")
+    def test_default_follows_env_testnet_true(self, MockClient):
+        from ingestion.binance_client import BinanceClientWrapper
+        BinanceClientWrapper()
+        MockClient.assert_called_once_with("test_key", "test_secret", testnet=True)
+
+    @patch("ingestion.binance_client.Client")
+    def test_explicit_mainnet_uses_empty_keys(self, MockClient):
+        from ingestion.binance_client import BinanceClientWrapper
+        BinanceClientWrapper(testnet=False)
+        MockClient.assert_called_once_with("", "", testnet=False)
+
+    @patch("ingestion.binance_client.Client")
+    def test_explicit_testnet_keeps_env_keys(self, MockClient):
+        from ingestion.binance_client import BinanceClientWrapper
+        BinanceClientWrapper(testnet=True)
+        MockClient.assert_called_once_with("test_key", "test_secret", testnet=True)
+
+
+# ===========================================================================
 # 1b. BinanceClientWrapper.get_account_balance — must never fabricate a value
 # ===========================================================================
 

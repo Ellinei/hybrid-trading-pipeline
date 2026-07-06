@@ -42,6 +42,69 @@ def total_return(equity_curve: list[tuple[datetime, float]]) -> float:
     return (end - start) / start
 
 
+def expectancy(trades: list[dict]) -> float:
+    """Mean net PnL per trade (the per-trade edge after fees/slippage)."""
+    if not trades:
+        return 0.0
+    return sum(t["pnl"] for t in trades) / len(trades)
+
+
+def exit_reason_breakdown(trades: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for t in trades:
+        reason = t.get("reason", "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def holding_hours_stats(trades: list[dict]) -> dict[str, float]:
+    """Median/mean/p90 of holding time in hours (nearest-rank percentile)."""
+    hours = sorted(
+        (t["exit_time"] - t["entry_time"]).total_seconds() / 3600.0
+        for t in trades
+        if t.get("exit_time") is not None and t.get("entry_time") is not None
+    )
+    if not hours:
+        return {"median": 0.0, "mean": 0.0, "p90": 0.0}
+    n = len(hours)
+    return {
+        "median": hours[(n - 1) // 2],
+        "mean": sum(hours) / n,
+        "p90": hours[max(0, math.ceil(0.9 * n) - 1)],
+    }
+
+
+def per_window_metrics(
+    trades: list[dict], boundaries: list[datetime]
+) -> list[dict]:
+    """Bucket trades into retrain windows and score each independently.
+
+    *boundaries* are the walk-forward retrain timestamps; window i spans
+    [boundaries[i], boundaries[i+1]) and the last window is open-ended.
+    Trades are attributed by entry_time (the model that opened them).
+    Trades entered before the first boundary (warm-up) are excluded.
+    """
+    if not boundaries:
+        return []
+    ordered = sorted(boundaries)
+    windows = []
+    for i, start in enumerate(ordered):
+        end = ordered[i + 1] if i + 1 < len(ordered) else None
+        bucket = [
+            t for t in trades
+            if t["entry_time"] >= start and (end is None or t["entry_time"] < end)
+        ]
+        windows.append({
+            "window_start": start,
+            "window_end": end,
+            "trade_count": len(bucket),
+            "pnl": sum(t["pnl"] for t in bucket),
+            "profit_factor": profit_factor(bucket),
+            "win_rate": win_rate(bucket),
+        })
+    return windows
+
+
 def sharpe_ratio(
     equity_curve: list[tuple[datetime, float]], periods_per_year: float
 ) -> float:

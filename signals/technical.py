@@ -18,8 +18,15 @@ log = structlog.get_logger()
 class TechnicalSignalGenerator:
     """Generates BUY / SELL / HOLD signals from ``features.feat_technical``."""
 
-    def __init__(self, db_engine) -> None:
+    def __init__(
+        self,
+        db_engine,
+        require_uptrend_for_buys: bool = False,
+        guard_bb_dip_buy: bool = False,
+    ) -> None:
         self.engine = db_engine
+        self.require_uptrend_for_buys = require_uptrend_for_buys
+        self.guard_bb_dip_buy = guard_bb_dip_buy
 
     # ------------------------------------------------------------------
     # DB access
@@ -44,7 +51,7 @@ class TechnicalSignalGenerator:
             SELECT
                 rsi_14_proxy, macd_line, bb_zscore,
                 pct_change_1h, pct_change_24h, log_return_1h,
-                range_14, volume
+                range_14, volume, close_vs_sma50
             FROM features.feat_technical
             WHERE symbol = :symbol
             {cutoff_clause}
@@ -59,6 +66,77 @@ class TechnicalSignalGenerator:
     # Signal logic
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def evaluate_rules(
+        features: dict,
+        require_uptrend_for_buys: bool = False,
+        guard_bb_dip_buy: bool = False,
+    ) -> tuple[SignalDirection, float, dict]:
+        """Pure rule evaluation: features dict → (direction, confidence, meta).
+
+        No DB, no clock — the backtest sweep replays this function over
+        pre-loaded feature rows, so any rule change here automatically
+        applies to both live signals and sweep replays.
+        """
+        rsi    = v if (v := features.get("rsi_14_proxy"))  is not None else 50.0
+        macd   = v if (v := features.get("macd_line"))     is not None else 0.0
+        bz     = v if (v := features.get("bb_zscore"))     is not None else 0.0
+        pct_1h = v if (v := features.get("pct_change_1h")) is not None else 0.0
+        pct_24 = v if (v := features.get("pct_change_24h"))is not None else 0.0
+        sma50  = v if (v := features.get("close_vs_sma50"))is not None else 0.0
+
+        meta = {
+            "rsi": rsi, "macd": macd, "bb_zscore": bz,
+            "pct_change_1h": pct_1h, "pct_change_24h": pct_24,
+            "close_vs_sma50": sma50,
+        }
+
+        # Regime filter: when enabled, strong BUY rules also require price
+        # above its 50-bar SMA — no dip-buying inside a downtrend. A missing
+        # sma50 value blocks the BUY (conservative).
+        uptrend_ok = (not require_uptrend_for_buys) or sma50 > 0
+
+        # ── Strong BUY ──────────────────────────────────────────────
+        # pct_1h > 0 guards against falling-knife entries: RSI<30 in crypto
+        # historically precedes multi-month consolidation, not V-reversals.
+        # Require positive 1h momentum to confirm the dip is already bouncing.
+        if rsi < 30 and macd > 0 and pct_1h > 0 and uptrend_ok:
+            return SignalDirection.BUY, 0.8, meta
+        # guard_bb_dip_buy applies the same falling-knife guard as the RSI
+        # rule: a -2σ Bollinger break during a crash keeps crashing more
+        # often than it mean-reverts. Off by default (legacy behavior);
+        # measured as an A/B toggle before adoption.
+        if bz < -2.0 and uptrend_ok and (pct_1h > 0 or not guard_bb_dip_buy):
+            return SignalDirection.BUY, 0.75, meta
+
+        # ── Strong SELL ─────────────────────────────────────────────
+        if rsi > 70 and macd < 0:
+            return SignalDirection.SELL, 0.8, meta
+        if bz > 2.0:
+            return SignalDirection.SELL, 0.75, meta
+
+        # ── Moderate BUY ────────────────────────────────────────────
+        # NOTE: with default aggregator weights these BUY rules can never
+        # clear the risk gate (0.55-0.60 × 0.40 < min_confidence 0.55 even
+        # with max ML agreement) — kept for signal telemetry and for sweep
+        # configs that lower the gates.
+        if rsi < 40 and pct_1h > 0 and uptrend_ok:
+            return SignalDirection.BUY, 0.55, meta
+        if macd > 0 and pct_24 > 2.0 and uptrend_ok:
+            return SignalDirection.BUY, 0.6, meta
+
+        # ── Moderate SELL ───────────────────────────────────────────
+        # These ARE load-bearing: SELL bypasses the risk gate's confidence
+        # check, so a lone moderate SELL (0.55×0.40 = 0.22 > 0.15) closes
+        # positions — they are the strategy's de facto exit engine.
+        if rsi > 60 and pct_1h < 0:
+            return SignalDirection.SELL, 0.55, meta
+        if macd < 0 and pct_24 < -2.0:
+            return SignalDirection.SELL, 0.6, meta
+
+        # ── Default ─────────────────────────────────────────────────
+        return SignalDirection.HOLD, 0.5, meta
+
     def generate_signal(self, symbol: str, as_of: datetime | None = None) -> Signal:
         """Apply rule set and return a Signal."""
         now = as_of if as_of is not None else datetime.now(timezone.utc)
@@ -71,50 +149,13 @@ class TechnicalSignalGenerator:
                 metadata={},
             )
 
-        rsi    = v if (v := features.get("rsi_14_proxy"))  is not None else 50.0
-        macd   = v if (v := features.get("macd_line"))     is not None else 0.0
-        bz     = v if (v := features.get("bb_zscore"))     is not None else 0.0
-        pct_1h = v if (v := features.get("pct_change_1h")) is not None else 0.0
-        pct_24 = v if (v := features.get("pct_change_24h"))is not None else 0.0
-
-        meta = {
-            "rsi": rsi, "macd": macd, "bb_zscore": bz,
-            "pct_change_1h": pct_1h, "pct_change_24h": pct_24,
-        }
-
-        def sig(direction: SignalDirection, confidence: float) -> Signal:
-            return Signal(
-                direction=direction, confidence=confidence,
-                source="technical", symbol=symbol, timestamp=now,
-                metadata=meta,
-            )
-
-        # ── Strong BUY ──────────────────────────────────────────────
-        # pct_1h > 0 guards against falling-knife entries: RSI<30 in crypto
-        # historically precedes multi-month consolidation, not V-reversals.
-        # Require positive 1h momentum to confirm the dip is already bouncing.
-        if rsi < 30 and macd > 0 and pct_1h > 0:
-            return sig(SignalDirection.BUY, 0.8)
-        if bz < -2.0:
-            return sig(SignalDirection.BUY, 0.75)
-
-        # ── Strong SELL ─────────────────────────────────────────────
-        if rsi > 70 and macd < 0:
-            return sig(SignalDirection.SELL, 0.8)
-        if bz > 2.0:
-            return sig(SignalDirection.SELL, 0.75)
-
-        # ── Moderate BUY ────────────────────────────────────────────
-        if rsi < 40 and pct_1h > 0:
-            return sig(SignalDirection.BUY, 0.55)
-        if macd > 0 and pct_24 > 2.0:
-            return sig(SignalDirection.BUY, 0.6)
-
-        # ── Moderate SELL ───────────────────────────────────────────
-        if rsi > 60 and pct_1h < 0:
-            return sig(SignalDirection.SELL, 0.55)
-        if macd < 0 and pct_24 < -2.0:
-            return sig(SignalDirection.SELL, 0.6)
-
-        # ── Default ─────────────────────────────────────────────────
-        return sig(SignalDirection.HOLD, 0.5)
+        direction, confidence, meta = self.evaluate_rules(
+            features,
+            require_uptrend_for_buys=self.require_uptrend_for_buys,
+            guard_bb_dip_buy=self.guard_bb_dip_buy,
+        )
+        return Signal(
+            direction=direction, confidence=confidence,
+            source="technical", symbol=symbol, timestamp=now,
+            metadata=meta,
+        )

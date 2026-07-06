@@ -43,8 +43,9 @@ def _load_all_features(db_engine, symbols: list[str]):
 
     Queries the DB once per symbol (avoids N×retraining-boundary queries).
     Returns a pandas DataFrame sorted by (symbol, timestamp) with an added
-    'target' column: 1 if close rises from this bar to the next (per symbol).
-    Last row per symbol is dropped (no known target).
+    'target' column using the SAME label definition as MLSignalGenerator
+    (k-bar forward net return above cost). Rows without a known future
+    close are dropped.
     """
     import pandas as pd
     from sqlalchemy import text
@@ -72,9 +73,10 @@ def _load_all_features(db_engine, symbols: list[str]):
     # Ensure timestamps are UTC-aware for comparison with bar timestamps
     if not full["timestamp"].dt.tz:
         full["timestamp"] = full["timestamp"].dt.tz_localize("UTC")
-    full["next_close"] = full.groupby("symbol")["close"].shift(-1)
-    full["target"] = (full["next_close"] > full["close"]).astype(int)
-    full = full.dropna(subset=["next_close"])
+    horizon = MLSignalGenerator.LABEL_HORIZON_BARS
+    full["future_close"] = full.groupby("symbol")["close"].shift(-horizon)
+    full["target"] = MLSignalGenerator.compute_target(full["close"], full["future_close"])
+    full = full.dropna(subset=["future_close"])
     return full.reset_index(drop=True)
 
 
@@ -95,6 +97,7 @@ class BacktestResult:
     equity_curve: list[tuple[datetime, float]]
     metrics: dict[str, float]
     warnings: list[str]
+    retrain_events: list[dict] = field(default_factory=list)
 
 
 def _infer_periods_per_year_from_equity_curve(
@@ -188,6 +191,7 @@ def run_backtest(
     min_train_days: int = 60,
     feature_df=None,
     db_engine=None,
+    train_window_days: int = 0,
 ) -> BacktestResult:
     """Replay historical bars through the live signal/risk/fill logic.
 
@@ -198,6 +202,10 @@ def run_backtest(
     When *walk_forward_months* > 0, the ML model is retrained in-memory at
     each monthly boundary using only data that existed up to that point,
     making all post-warm-up ML signals genuinely out-of-sample.
+
+    *train_window_days* > 0 caps each retrain to a sliding window of that
+    many days instead of an expanding all-history window — bounds retrain
+    cost on multi-year datasets.
     """
     import pandas as pd
 
@@ -205,6 +213,7 @@ def run_backtest(
     risk = SimulatedRiskManager(
         state, initial_balance=config.initial_balance, config=config.risk_config
     )
+    retrain_events: list[dict] = []
 
     # Walk-forward setup
     ml_gen = getattr(aggregator, "ml", None)
@@ -236,10 +245,24 @@ def run_backtest(
             if next_retrain_at is None:
                 next_retrain_at = timestamp + timedelta(days=min_train_days)
             if timestamp >= next_retrain_at:
-                slice_df = feature_df[
-                    feature_df["timestamp"] < pd.Timestamp(timestamp)
-                ].copy()
-                if ml_gen.train_in_memory(slice_df):
+                # Exclude the final label-horizon hours: a row's target uses
+                # the close LABEL_HORIZON_BARS after it, so rows newer than
+                # (now - horizon) have labels that peek past "now" — training
+                # on them leaks future prices into the model.
+                from signals.ml_model import MLSignalGenerator
+                label_cutoff = pd.Timestamp(timestamp) - timedelta(
+                    hours=MLSignalGenerator.LABEL_HORIZON_BARS
+                )
+                mask = feature_df["timestamp"] < label_cutoff
+                if train_window_days > 0:
+                    window_start = label_cutoff - timedelta(days=train_window_days)
+                    mask &= feature_df["timestamp"] >= window_start
+                slice_df = feature_df[mask].copy()
+                trained = ml_gen.train_in_memory(slice_df)
+                retrain_events.append(
+                    {"at": timestamp, "rows": len(slice_df), "trained": trained}
+                )
+                if trained:
                     log.info("walk_forward_retrained",
                              at=str(timestamp), rows=len(slice_df))
                 else:
@@ -255,6 +278,16 @@ def run_backtest(
                 reason, trigger_price = hit
                 _close_position(state, config, symbol, position, trigger_price,
                                  timestamp, reason)
+                position = None
+            elif (
+                config.risk_config.max_hold_bars > 0
+                and timestamp - position.entry_time
+                    >= timedelta(hours=config.risk_config.max_hold_bars)
+            ):
+                # Time-stop: the ML edge is defined over LABEL_HORIZON_BARS;
+                # holding past max_hold_bars is unmodeled exposure.
+                _close_position(state, config, symbol, position, bar.close,
+                                 timestamp, "time_stop")
                 position = None
 
         state.current_atr[symbol] = atr_lookup.get(timestamp, 0.0)
@@ -298,4 +331,5 @@ def run_backtest(
         equity_curve=state.equity_curve,
         metrics=metrics,
         warnings=[warning],
+        retrain_events=retrain_events,
     )

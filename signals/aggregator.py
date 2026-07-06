@@ -40,10 +40,27 @@ _DISPLAY_NAME: dict[str, str] = {
 class SignalAggregator:
     """Fuses three signal sources into a single ``AggregatedSignal``."""
 
-    def __init__(self, db_engine, weights: dict | None = None) -> None:
+    def __init__(
+        self,
+        db_engine,
+        weights: dict | None = None,
+        buy_gate: float = 0.15,
+        sell_gate: float = -0.15,
+        technical: TechnicalSignalGenerator | None = None,
+        ml: MLSignalGenerator | None = None,
+    ) -> None:
+        """*buy_gate*/*sell_gate* are the fused-score direction thresholds.
+        The sell gate is the strategy's de facto exit threshold: SELL
+        bypasses the risk manager's confidence check, so any fused score
+        below *sell_gate* closes an open position.
+
+        Pass pre-built *technical*/*ml* generators to inject non-default
+        rule/threshold parameters (backtest sweeps, A/B toggles)."""
         self.weights   = weights or DEFAULT_WEIGHTS
-        self.technical = TechnicalSignalGenerator(db_engine)
-        self.ml        = MLSignalGenerator(db_engine)
+        self.buy_gate  = buy_gate
+        self.sell_gate = sell_gate
+        self.technical = technical or TechnicalSignalGenerator(db_engine)
+        self.ml        = ml or MLSignalGenerator(db_engine)
         self.sentiment = SentimentSignalGenerator()
         self._neutral_sentiment = NeutralSentimentSignalGenerator()
 
@@ -84,9 +101,9 @@ class SignalAggregator:
             for s in signals
         )
 
-        if score > 0.15:
+        if score > self.buy_gate:
             direction = SignalDirection.BUY
-        elif score < -0.15:
+        elif score < self.sell_gate:
             direction = SignalDirection.SELL
         else:
             direction = SignalDirection.HOLD

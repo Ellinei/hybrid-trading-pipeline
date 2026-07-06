@@ -63,11 +63,19 @@ def _retry(max_retries: int = 3, backoff_base: float = 2.0):
 class BinanceClientWrapper:
     """Binance REST API wrapper with testnet support and structured logging."""
 
-    def __init__(self) -> None:
+    def __init__(self, testnet: bool | None = None) -> None:
         load_dotenv()
-        api_key = os.getenv("BINANCE_API_KEY", "")
-        api_secret = os.getenv("BINANCE_API_SECRET", "")
-        testnet = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
+        if testnet is None:
+            testnet = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
+        if testnet:
+            api_key = os.getenv("BINANCE_API_KEY", "")
+            api_secret = os.getenv("BINANCE_API_SECRET", "")
+        else:
+            # Explicit mainnet is data-only: market-data endpoints are
+            # public, and the env keys are testnet credentials that must
+            # never be sent to the live exchange.
+            api_key = ""
+            api_secret = ""
         symbols_raw = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
 
         self.symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]

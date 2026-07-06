@@ -15,8 +15,8 @@ dist/
 build/
 .eggs/
 
-# Testing
-.coverage
+# Testing (.coverage* also catches per-process shards like .coverage.<host>.<pid>.<rand>)
+.coverage*
 htmlcov/
 .pytest_cache/
 .tox/

@@ -147,7 +147,8 @@ def main() -> int:
         print(f"  Database connection FAILED: {exc}")
         all_ok = False
 
-    verdict = "All checks passed ✓" if all_ok else "SOME CHECKS FAILED ✗"
+    # ASCII only — Windows consoles default to cp1252, which can't encode ✓/✗
+    verdict = "All checks passed [OK]" if all_ok else "SOME CHECKS FAILED [X]"
     print(f"\n{verdict}\n")
     return 0 if all_ok else 1
 

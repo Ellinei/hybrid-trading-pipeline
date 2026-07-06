@@ -61,7 +61,8 @@ windowed as (
         w20 as (partition by symbol order by timestamp rows between 19 preceding and current row),
         w26 as (partition by symbol order by timestamp rows between 25 preceding and current row),
         w50 as (partition by symbol order by timestamp rows between 49 preceding and current row)
-)
+),
+final as (
 select
     symbol,
     timestamp,
@@ -109,6 +110,10 @@ select
     100.0 * (close - low_14) / nullif(high_14 - low_14, 0)            as stoch_k,
     current_timestamp                                                  as computed_at
 from windowed
+)
+-- Postgres can't reference select-list aliases in the same query's WHERE,
+-- so the null filter lives outside the CTE that defines them.
+select * from final
 where log_return_1h is not null
   and upper_wick_pct is not null
   and stoch_k is not null

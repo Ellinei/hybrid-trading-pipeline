@@ -25,7 +25,8 @@ class RiskConfig:
     stop_loss_atr_mult:    float = 1.5
     take_profit_atr_mult:  float = 3.0
     max_drawdown_pct:      float = 0.10   # 10 % circuit-breaker
-    min_confidence:        float = 0.55 
+    min_confidence:        float = 0.55
+    max_hold_bars:         int   = 0      # close after N hourly bars (0 = disabled)
 
 
 class RiskManager:

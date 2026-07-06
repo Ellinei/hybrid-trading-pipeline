@@ -157,6 +157,80 @@ class TestTechnicalSignals:
 
 
 # ===========================================================================
+# 3a2. Technical rule toggles (Phase 3 A/B knobs — legacy defaults off)
+# ===========================================================================
+
+class TestTechnicalRuleToggles:
+
+    def test_bb_guard_off_buys_falling_knife(self):
+        """Legacy default: bb_zscore<-2 buys even while price is falling."""
+        from signals.technical import TechnicalSignalGenerator
+
+        feats = _features(bb_zscore=-2.5, pct_change_1h=-0.5)
+        direction, confidence, _ = TechnicalSignalGenerator.evaluate_rules(feats)
+
+        assert direction == SignalDirection.BUY
+        assert confidence == pytest.approx(0.75)
+
+    def test_bb_guard_on_blocks_falling_knife(self):
+        """guard_bb_dip_buy=True requires pct_1h > 0 before the dip-buy."""
+        from signals.technical import TechnicalSignalGenerator
+
+        feats = _features(bb_zscore=-2.5, pct_change_1h=-0.5)
+        direction, _, _ = TechnicalSignalGenerator.evaluate_rules(
+            feats, guard_bb_dip_buy=True
+        )
+
+        assert direction == SignalDirection.HOLD
+
+    def test_bb_guard_on_allows_bouncing_dip(self):
+        from signals.technical import TechnicalSignalGenerator
+
+        feats = _features(bb_zscore=-2.5, pct_change_1h=0.3)
+        direction, confidence, _ = TechnicalSignalGenerator.evaluate_rules(
+            feats, guard_bb_dip_buy=True
+        )
+
+        assert direction == SignalDirection.BUY
+        assert confidence == pytest.approx(0.75)
+
+    def test_regime_filter_blocks_buys_below_sma50(self):
+        """require_uptrend_for_buys=True blocks BUY rules when close_vs_sma50 <= 0."""
+        from signals.technical import TechnicalSignalGenerator
+
+        feats = _features(rsi_14_proxy=25.0, macd_line=0.5,
+                          pct_change_1h=0.5, close_vs_sma50=-3.0)
+        direction, _, _ = TechnicalSignalGenerator.evaluate_rules(
+            feats, require_uptrend_for_buys=True
+        )
+
+        assert direction == SignalDirection.HOLD
+
+    def test_regime_filter_allows_buys_above_sma50(self):
+        from signals.technical import TechnicalSignalGenerator
+
+        feats = _features(rsi_14_proxy=25.0, macd_line=0.5,
+                          pct_change_1h=0.5, close_vs_sma50=2.0)
+        direction, confidence, _ = TechnicalSignalGenerator.evaluate_rules(
+            feats, require_uptrend_for_buys=True
+        )
+
+        assert direction == SignalDirection.BUY
+        assert confidence == pytest.approx(0.8)
+
+    def test_regime_filter_never_blocks_sells(self):
+        """SELL rules are exits — the regime filter must not gate them."""
+        from signals.technical import TechnicalSignalGenerator
+
+        feats = _features(rsi_14_proxy=75.0, macd_line=-0.5, close_vs_sma50=-3.0)
+        direction, _, _ = TechnicalSignalGenerator.evaluate_rules(
+            feats, require_uptrend_for_buys=True
+        )
+
+        assert direction == SignalDirection.SELL
+
+
+# ===========================================================================
 # 3b. Technical signal — as_of historical cutoff (for backtesting)
 # ===========================================================================
 
@@ -247,6 +321,25 @@ class TestMLSignal:
 
         assert gen.train_in_memory(df) is False
         assert gen.is_trained_in_memory() is False
+
+    def test_compute_target_cost_hurdle_edges(self):
+        """Label is 1 only when forward return STRICTLY exceeds LABEL_MIN_RETURN:
+        exactly at the hurdle → 0, just above → 1, below/negative → 0."""
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        hurdle = MLSignalGenerator.LABEL_MIN_RETURN
+        close = pd.Series([100.0, 100.0, 100.0, 100.0])
+        future_close = pd.Series([
+            100.0 * (1 + hurdle),        # exactly at hurdle → 0
+            100.0 * (1 + hurdle) + 0.01, # just above → 1
+            100.0,                        # flat → 0
+            99.0,                         # down → 0
+        ])
+
+        target = MLSignalGenerator.compute_target(close, future_close)
+
+        assert target.tolist() == [0, 1, 0, 0]
 
     def test_train_in_memory_smoke(self):
         """200 synthetic rows → True; in-memory model and scaler are set."""
@@ -389,12 +482,15 @@ class TestNeutralSentimentSignalGenerator:
 
 class TestSignalAggregator:
 
-    def _agg(self, tech, ml, sent, tc=0.8, mc=0.7, sc=0.6):
+    def _agg(self, tech, ml, sent, tc=0.8, mc=0.7, sc=0.6,
+             buy_gate=0.15, sell_gate=-0.15):
         """Build an aggregator with mocked generators. Bypasses __init__."""
         from signals.aggregator import SignalAggregator
 
         agg = SignalAggregator.__new__(SignalAggregator)
         agg.weights = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
+        agg.buy_gate  = buy_gate
+        agg.sell_gate = sell_gate
         agg.technical = MagicMock()
         agg.ml        = MagicMock()
         agg.sentiment = MagicMock()
@@ -423,12 +519,36 @@ class TestSignalAggregator:
         result = agg.aggregate("BTCUSDT")
         assert result.direction == SignalDirection.HOLD
 
+    def test_custom_sell_gate_changes_exit_threshold(self):
+        """A lone moderate SELL scores -0.22; a stricter sell_gate=-0.30
+        keeps it HOLD, while the default -0.15 lets it through."""
+        # technical SELL(0.55)*0.40 = -0.22, others HOLD
+        default_agg = self._agg(SignalDirection.SELL, SignalDirection.HOLD,
+                                SignalDirection.HOLD, tc=0.55)
+        strict_agg = self._agg(SignalDirection.SELL, SignalDirection.HOLD,
+                               SignalDirection.HOLD, tc=0.55, sell_gate=-0.30)
+
+        assert default_agg.aggregate("BTCUSDT").direction == SignalDirection.SELL
+        assert strict_agg.aggregate("BTCUSDT").direction == SignalDirection.HOLD
+
+    def test_custom_buy_gate_changes_entry_threshold(self):
+        """technical BUY(0.55)*0.40 = 0.22: passes 0.15, fails 0.30."""
+        default_agg = self._agg(SignalDirection.BUY, SignalDirection.HOLD,
+                                SignalDirection.HOLD, tc=0.55)
+        strict_agg = self._agg(SignalDirection.BUY, SignalDirection.HOLD,
+                               SignalDirection.HOLD, tc=0.55, buy_gate=0.30)
+
+        assert default_agg.aggregate("BTCUSDT").direction == SignalDirection.BUY
+        assert strict_agg.aggregate("BTCUSDT").direction == SignalDirection.HOLD
+
     def test_aggregator_fallback_one_generator_throws(self):
         """test_aggregator_fallback — one generator raises, others still used."""
         from signals.aggregator import SignalAggregator
 
         agg = SignalAggregator.__new__(SignalAggregator)
         agg.weights   = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
+        agg.buy_gate  = 0.15
+        agg.sell_gate = -0.15
         agg.technical = MagicMock()
         agg.ml        = MagicMock()
         agg.sentiment = MagicMock()
@@ -484,6 +604,8 @@ class TestAggregatorAsOf:
 
         agg = SignalAggregator.__new__(SignalAggregator)
         agg.weights   = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
+        agg.buy_gate  = 0.15
+        agg.sell_gate = -0.15
         agg.technical = MagicMock()
         agg.ml        = MagicMock()
         agg.sentiment = MagicMock()
@@ -506,6 +628,8 @@ class TestSignalReasoningString:
 
         agg = SignalAggregator.__new__(SignalAggregator)
         agg.weights   = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
+        agg.buy_gate  = 0.15
+        agg.sell_gate = -0.15
         agg.technical = MagicMock()
         agg.ml        = MagicMock()
         agg.sentiment = MagicMock()
