@@ -241,7 +241,6 @@ def main() -> None:
     if args.label_horizon is not None or args.label_min_return is not None:
         # Class-level override so BOTH target computations (SQL training path
         # and the walk-forward feature pre-loader) pick up the same label.
-        from signals.ml_model import MLSignalGenerator
         if args.label_horizon is not None:
             MLSignalGenerator.LABEL_HORIZON_BARS = args.label_horizon
         if args.label_min_return is not None:
