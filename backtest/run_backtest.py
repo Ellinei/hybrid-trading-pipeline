@@ -4,6 +4,7 @@ Usage:
     python -m backtest.run_backtest
     python -m backtest.run_backtest --symbols BTCUSDT,ETHUSDT --start 2026-04-01 --end 2026-06-01
     python -m backtest.run_backtest --output trades.csv
+    python -m backtest.run_backtest --prob-stats --walk-forward 1 --train-window-days 540
 """
 from __future__ import annotations
 
@@ -122,6 +123,77 @@ def _print_report(symbols: list[str], result: BacktestResult) -> None:
             print(f"   - {w}")
 
 
+def _print_prob_stats(
+    feature_df,
+    bars_by_symbol: dict[str, list[OHLCVBar]],
+    symbols: list[str],
+    min_train_days: int,
+    walk_forward_months: int,
+    train_window_days: int,
+    thresholds: tuple[float, ...] = (0.65, 0.60, 0.55, 0.50),
+) -> None:
+    """Diagnose ML prob_up distributions per month across the walk-forward run.
+
+    Prints for each calendar month: how many bars have a prob_up computed
+    (post-warm-up only), the maximum prob, and what fraction exceed each
+    threshold.  Used to diagnose the 'strategy self-disables' symptom where
+    prob_up > 0.65 never fires on mature training data (exp002).
+    """
+    from backtest.signal_cache import precompute_walk_forward_probs
+
+    # Build the chronological (timestamp, symbol) bar stream, same merge
+    # order the engine uses — retrain boundaries must land on the same bars.
+    bar_stream: list[tuple[datetime, str]] = sorted(
+        (bar.timestamp, symbol)
+        for symbol in symbols
+        for bar in bars_by_symbol.get(symbol, [])
+    )
+    if not bar_stream:
+        print("  (no bars loaded — nothing to analyse)")
+        return
+
+    print(f"\n  Precomputing walk-forward probs "
+          f"(min_train_days={min_train_days}, "
+          f"walk_forward_months={walk_forward_months}, "
+          f"train_window_days={train_window_days or 'expanding'})…", flush=True)
+
+    prob_map = precompute_walk_forward_probs(
+        feature_df, bar_stream,
+        min_train_days=min_train_days,
+        walk_forward_months=walk_forward_months,
+        train_window_days=train_window_days,
+    )
+
+    if not prob_map:
+        print("  (no probs computed — warm-up covers the entire dataset)")
+        return
+
+    # Group by year-month for each symbol
+    from collections import defaultdict
+    monthly: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for (symbol, ts), prob in prob_map.items():
+        month_key = (symbol, ts.strftime("%Y-%m"))
+        monthly[month_key].append(prob)
+
+    thr_header = "  ".join(f">={t:.2f}" for t in thresholds)
+    print(f"\n=== ML prob_up distribution by month ===")
+    print(f"  {'symbol':<10} {'month':<8}  {'n':>5}  {'max':>5}  {thr_header}")
+    print(f"  {'-'*10} {'-'*8}  {'-'*5}  {'-'*5}  " + "  ".join("-"*6 for _ in thresholds))
+
+    for (symbol, month), probs in sorted(monthly.items()):
+        n = len(probs)
+        max_p = max(probs)
+        pcts = "  ".join(f"{sum(p >= t for p in probs)/n:>5.1%}" for t in thresholds)
+        print(f"  {symbol:<10} {month:<8}  {n:>5}  {max_p:.3f}  {pcts}")
+
+    all_probs = list(prob_map.values())
+    print(f"\n  ALL: n={len(all_probs)}, "
+          f"max={max(all_probs):.3f}, "
+          f"mean={sum(all_probs)/len(all_probs):.3f}, "
+          + "  ".join(f">={t:.2f}: {sum(p>=t for p in all_probs)/len(all_probs):.1%}"
+                      for t in thresholds))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Historical backtest harness")
     parser.add_argument("--symbols", type=str, default=None,
@@ -160,6 +232,10 @@ def main() -> None:
                          help="ML prob_up below which the ML source says SELL (default: 0.35)")
     parser.add_argument("--max-hold-bars", type=int, default=0,
                          help="Time-stop: close positions after N hourly bars (0=disabled)")
+    parser.add_argument("--prob-stats", action="store_true", default=False,
+                         help="Diagnostic mode: precompute walk-forward ML prob_up distributions "
+                              "per month and exit without running the full backtest simulation. "
+                              "Use with --walk-forward to match the retraining schedule of a real run.")
     args = parser.parse_args()
 
     if args.label_horizon is not None or args.label_min_return is not None:
@@ -232,12 +308,23 @@ def main() -> None:
     min_train_days = args.min_train_days
     feature_df = None
 
-    if walk_forward > 0:
-        print(f"\n  Walk-forward mode: ML retrain every {walk_forward} month(s), "
+    if walk_forward > 0 or args.prob_stats:
+        wf_months = walk_forward if walk_forward > 0 else 1
+        print(f"\n  Walk-forward mode: ML retrain every {wf_months} month(s), "
               f"warm-up {min_train_days} day(s)")
         print("  Pre-loading feature data for walk-forward…", flush=True)
         feature_df = _load_all_features(engine, symbols)
         print(f"  Loaded {len(feature_df)} feature rows across {len(symbols)} symbol(s).")
+
+    if args.prob_stats:
+        _print_prob_stats(
+            feature_df, bars_by_symbol, symbols,
+            min_train_days=min_train_days,
+            walk_forward_months=walk_forward if walk_forward > 0 else 1,
+            train_window_days=args.train_window_days,
+        )
+        engine.dispose()
+        return
 
     result = run_backtest(
         bars_by_symbol=bars_by_symbol,
