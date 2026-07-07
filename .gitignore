@@ -53,3 +53,6 @@ dbt/dbt_packages/
 
 # Generated backtest trade logs (analysis artifacts, not source)
 trades_*.csv
+
+# Precomputed walk-forward probability caches (large pickle files)
+cache/
