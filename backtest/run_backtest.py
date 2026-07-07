@@ -374,6 +374,13 @@ def main() -> None:
 
     _print_report(symbols, result)
 
+    if args.output and result.trades:
+        with open(args.output, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(result.trades[0].keys()))
+            writer.writeheader()
+            writer.writerows(result.trades)
+        print(f"\n  Trade log written to {args.output}")
+
     if args.save_cache:
         from backtest.signal_cache import precompute_walk_forward_probs
         _wf_cs = walk_forward if walk_forward > 0 else 1
@@ -409,13 +416,6 @@ def main() -> None:
                 _f,
             )
         print(f"  Cache saved → {args.save_cache} ({len(_prob_map_cs)} entries)")
-
-    if args.output and result.trades:
-        with open(args.output, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(result.trades[0].keys()))
-            writer.writeheader()
-            writer.writerows(result.trades)
-        print(f"\n  Trade log written to {args.output}")
 
     engine.dispose()
 
