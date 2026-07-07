@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import pickle
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
@@ -236,6 +237,12 @@ def main() -> None:
                          help="Diagnostic mode: precompute walk-forward ML prob_up distributions "
                               "per month and exit without running the full backtest simulation. "
                               "Use with --walk-forward to match the retraining schedule of a real run.")
+    parser.add_argument("--save-cache", type=str, default=None, metavar="PATH",
+                         help="After the walk-forward run, precompute prob_map+feature_df and "
+                              "pickle them to PATH so subsequent sweeps can skip retraining")
+    parser.add_argument("--load-cache", type=str, default=None, metavar="PATH",
+                         help="Load precomputed prob_map+feature_df from PATH (no GridSearchCV); "
+                              "combine with --bb-guard/--buy-gate/etc. for fast parameter sweeps")
     args = parser.parse_args()
 
     if args.label_horizon is not None or args.label_min_return is not None:
@@ -307,7 +314,7 @@ def main() -> None:
     min_train_days = args.min_train_days
     feature_df = None
 
-    if walk_forward > 0 or args.prob_stats:
+    if (walk_forward > 0 or args.prob_stats or args.save_cache) and not args.load_cache:
         wf_months = walk_forward if walk_forward > 0 else 1
         print(f"\n  Walk-forward mode: ML retrain every {wf_months} month(s), "
               f"warm-up {min_train_days} day(s)")
@@ -325,6 +332,33 @@ def main() -> None:
         engine.dispose()
         return
 
+    if args.load_cache:
+        from backtest.signal_cache import FusionParams, ReplayAggregator
+        print(f"\n  Loading cache from {args.load_cache}…", flush=True)
+        with open(args.load_cache, "rb") as _f:
+            _cache = pickle.load(_f)
+        _prob_map = _cache["prob_map"]
+        feature_df = _cache["feature_df"]
+        _meta = _cache.get("meta", {})
+        _cached_h = _meta.get("label_horizon", MLSignalGenerator.LABEL_HORIZON_BARS)
+        _cached_r = _meta.get("label_min_return", MLSignalGenerator.LABEL_MIN_RETURN)
+        if (_cached_h != MLSignalGenerator.LABEL_HORIZON_BARS
+                or _cached_r != MLSignalGenerator.LABEL_MIN_RETURN):
+            print(f"  WARNING: cache label (h={_cached_h}/r={_cached_r}) != "
+                  f"current (h={MLSignalGenerator.LABEL_HORIZON_BARS}/"
+                  f"r={MLSignalGenerator.LABEL_MIN_RETURN}) — results may differ")
+        print(f"  Cache: {len(_prob_map)} prob entries, label h={_cached_h}/r={_cached_r}")
+        _fusion = FusionParams(
+            buy_gate=args.buy_gate,
+            sell_gate=args.sell_gate,
+            ml_buy_threshold=args.ml_buy_threshold,
+            ml_sell_threshold=args.ml_sell_threshold,
+            require_uptrend_for_buys=args.require_uptrend,
+            guard_bb_dip_buy=args.bb_guard,
+        )
+        aggregator = ReplayAggregator(feature_df, _prob_map, _fusion)
+        walk_forward = 0  # probs already embedded; engine must not retrain
+
     result = run_backtest(
         bars_by_symbol=bars_by_symbol,
         atr_by_symbol=atr_by_symbol,
@@ -339,6 +373,42 @@ def main() -> None:
     )
 
     _print_report(symbols, result)
+
+    if args.save_cache:
+        from backtest.signal_cache import precompute_walk_forward_probs
+        _wf_cs = walk_forward if walk_forward > 0 else 1
+        _bar_stream_cs: list[tuple[datetime, str]] = sorted(
+            (bar.timestamp, sym)
+            for sym in symbols
+            for bar in bars_by_symbol.get(sym, [])
+        )
+        print(f"\n  Precomputing probs for cache "
+              f"(wf={_wf_cs}mo, min_train={min_train_days}d, "
+              f"window={args.train_window_days or 'expanding'})…", flush=True)
+        _prob_map_cs = precompute_walk_forward_probs(
+            feature_df, _bar_stream_cs,
+            min_train_days=min_train_days,
+            walk_forward_months=_wf_cs,
+            train_window_days=args.train_window_days,
+        )
+        _meta_cs = {
+            "label_horizon": MLSignalGenerator.LABEL_HORIZON_BARS,
+            "label_min_return": MLSignalGenerator.LABEL_MIN_RETURN,
+            "min_train_days": min_train_days,
+            "walk_forward_months": _wf_cs,
+            "train_window_days": args.train_window_days,
+            "symbols": symbols,
+        }
+        _cache_dir = os.path.dirname(args.save_cache)
+        if _cache_dir:
+            os.makedirs(_cache_dir, exist_ok=True)
+        with open(args.save_cache, "wb") as _f:
+            pickle.dump(
+                {"prob_map": _prob_map_cs, "feature_df": feature_df,
+                 "bar_stream": _bar_stream_cs, "meta": _meta_cs},
+                _f,
+            )
+        print(f"  Cache saved → {args.save_cache} ({len(_prob_map_cs)} entries)")
 
     if args.output and result.trades:
         with open(args.output, "w", newline="") as f:
