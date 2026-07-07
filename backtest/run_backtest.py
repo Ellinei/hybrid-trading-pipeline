@@ -243,6 +243,10 @@ def main() -> None:
     parser.add_argument("--load-cache", type=str, default=None, metavar="PATH",
                          help="Load precomputed prob_map+feature_df from PATH (no GridSearchCV); "
                               "combine with --bb-guard/--buy-gate/etc. for fast parameter sweeps")
+    parser.add_argument("--cache-only", action="store_true", default=False,
+                         help="Precompute and save the walk-forward prob cache (--save-cache required) "
+                              "then exit — skips the full backtest simulation (~15 min vs ~50 min). "
+                              "Use once to build the cache; then sweep variants with --load-cache.")
     args = parser.parse_args()
 
     if args.label_horizon is not None or args.label_min_return is not None:
@@ -314,7 +318,7 @@ def main() -> None:
     min_train_days = args.min_train_days
     feature_df = None
 
-    if (walk_forward > 0 or args.prob_stats or args.save_cache) and not args.load_cache:
+    if (walk_forward > 0 or args.prob_stats or args.save_cache or args.cache_only) and not args.load_cache:
         wf_months = walk_forward if walk_forward > 0 else 1
         print(f"\n  Walk-forward mode: ML retrain every {wf_months} month(s), "
               f"warm-up {min_train_days} day(s)")
@@ -329,6 +333,45 @@ def main() -> None:
             walk_forward_months=walk_forward if walk_forward > 0 else 1,
             train_window_days=args.train_window_days,
         )
+        engine.dispose()
+        return
+
+    if args.cache_only:
+        if not args.save_cache:
+            print("  ERROR: --cache-only requires --save-cache PATH")
+            engine.dispose()
+            return
+        from backtest.signal_cache import precompute_walk_forward_probs
+        _wf_co = walk_forward if walk_forward > 0 else 1
+        _bar_stream_co: list[tuple[datetime, str]] = sorted(
+            (bar.timestamp, sym)
+            for sym in symbols
+            for bar in bars_by_symbol.get(sym, [])
+        )
+        print(f"\n  --cache-only: precomputing walk-forward probs "
+              f"(wf={_wf_co}mo, min_train={min_train_days}d, "
+              f"window={args.train_window_days or 'expanding'})…", flush=True)
+        _prob_map_co = precompute_walk_forward_probs(
+            feature_df, _bar_stream_co,
+            min_train_days=min_train_days,
+            walk_forward_months=_wf_co,
+            train_window_days=args.train_window_days,
+        )
+        _meta_co = {
+            "label_horizon": MLSignalGenerator.LABEL_HORIZON_BARS,
+            "label_min_return": MLSignalGenerator.LABEL_MIN_RETURN,
+            "min_train_days": min_train_days,
+            "walk_forward_months": _wf_co,
+            "train_window_days": args.train_window_days,
+            "symbols": symbols,
+        }
+        _cache_dir_co = os.path.dirname(args.save_cache)
+        if _cache_dir_co:
+            os.makedirs(_cache_dir_co, exist_ok=True)
+        with open(args.save_cache, "wb") as _f:
+            pickle.dump({"prob_map": _prob_map_co, "feature_df": feature_df,
+                         "bar_stream": _bar_stream_co, "meta": _meta_co}, _f)
+        print(f"  Cache saved → {args.save_cache} ({len(_prob_map_co)} entries)")
         engine.dispose()
         return
 
