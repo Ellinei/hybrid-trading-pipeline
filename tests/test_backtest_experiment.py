@@ -23,6 +23,7 @@ import pytest
 
 from backtest.experiment import (
     ExperimentConfig,
+    _build_ledger_row,
     _cache_path_for_key,
     _compute_metrics,
     _write_artifacts,
@@ -67,6 +68,39 @@ class TestCachePathForKey:
         assert _cache_path_for_key("a" * 64) != _cache_path_for_key("b" * 64)
 
 
+class TestBuildLedgerRow:
+
+    def test_row_contains_key_metrics_as_markdown_table_row(self):
+        cfg = ExperimentConfig(exp_id="exp008", symbols=["BTCUSDT", "ETHUSDT"])
+        metrics = {
+            "trade_count": 170, "win_rate": 0.6118, "profit_factor": 1.23,
+            "expectancy": 4.44, "max_drawdown": 0.0675, "sharpe_ratio": 0.61,
+        }
+
+        row = _build_ledger_row(cfg, metrics, git_sha="abc1234",
+                                 data_range="2023-07-05..2026-07-04")
+
+        assert row.startswith("|") and row.rstrip().endswith("|")
+        assert "exp008" in row
+        assert "abc1234" in row
+        assert "170" in row
+        assert "1.23" in row
+        assert "4.44" in row
+        assert "61.2%" in row or "61.18%" in row
+        assert "2023-07-05..2026-07-04" in row
+
+    def test_infinite_pf_renders_as_inf_not_a_crash(self):
+        cfg = ExperimentConfig(exp_id="exp008")
+        metrics = {
+            "trade_count": 5, "win_rate": 1.0, "profit_factor": float("inf"),
+            "expectancy": 4.44, "max_drawdown": 0.0, "sharpe_ratio": 0.61,
+        }
+
+        row = _build_ledger_row(cfg, metrics, git_sha="abc1234", data_range="—")
+
+        assert "inf" in row
+
+
 class TestWriteArtifacts:
 
     def test_writes_all_expected_files(self, tmp_path):
@@ -77,7 +111,8 @@ class TestWriteArtifacts:
         out_dir = _write_artifacts(cfg, result, cache_path="cache/probs_deadbeef.pkl")
 
         assert os.path.isdir(out_dir)
-        for name in ("trades.csv", "equity_curve.csv", "metrics.json", "config.json"):
+        for name in ("trades.csv", "equity_curve.csv", "metrics.json",
+                     "config.json", "report.html", "ledger_row.md"):
             assert os.path.exists(os.path.join(out_dir, name)), name
 
     def test_trades_csv_matches_trade_rows(self, tmp_path):

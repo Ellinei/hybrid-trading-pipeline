@@ -147,6 +147,32 @@ def _compute_metrics(result) -> dict:
     }
 
 
+def _build_ledger_row(cfg: ExperimentConfig, metrics: dict, git_sha: str, data_range: str) -> str:
+    """A single markdown table row matching docs/experiments.md's exact
+    column format, ready to paste — but never auto-appended: the ledger's
+    value is the human verdict/notes column, and acceptance (LOSO,
+    holdout, concentration) needs a judgment call this function can't make.
+    """
+    pf = metrics["profit_factor"]
+    pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"| {cfg.exp_id} | {date_str} | {git_sha} | <!-- config delta vs baseline --> "
+        f"| {data_range} | {metrics['trade_count']} | {pf_str} | "
+        f"{metrics['expectancy']:+.2f} | {metrics['win_rate']:.1%} | "
+        f"{metrics['max_drawdown']:.2%} | {metrics['sharpe_ratio']:.2f} | "
+        f"— (cache replay, see report.html for monthly breakdown) | <!-- notes --> |"
+    )
+
+
+def _data_range(equity_curve) -> str:
+    if not equity_curve:
+        return "—"
+    start = equity_curve[0][0].strftime("%Y-%m-%d")
+    end = equity_curve[-1][0].strftime("%Y-%m-%d")
+    return f"{start}..{end}"
+
+
 def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str) -> str:
     out_dir = os.path.join(cfg.output_dir, cfg.exp_id)
     os.makedirs(out_dir, exist_ok=True)
@@ -166,12 +192,22 @@ def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str) -> str:
     with open(os.path.join(out_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2, default=str)
 
+    git_sha = _git_sha()
     config_dump = asdict(cfg)
-    config_dump["git_sha"] = _git_sha()
+    config_dump["git_sha"] = git_sha
     config_dump["cache_path"] = cache_path
     config_dump["generated_at"] = datetime.now(timezone.utc).isoformat()
     with open(os.path.join(out_dir, "config.json"), "w") as f:
         json.dump(config_dump, f, indent=2)
+
+    from backtest.report import build_report_html
+    html = build_report_html(cfg.exp_id, metrics, result.trades, result.equity_curve)
+    with open(os.path.join(out_dir, "report.html"), "w", encoding="utf-8") as f:
+        f.write(html)
+
+    ledger_row = _build_ledger_row(cfg, metrics, git_sha, _data_range(result.equity_curve))
+    with open(os.path.join(out_dir, "ledger_row.md"), "w", encoding="utf-8") as f:
+        f.write(ledger_row + "\n")
 
     return out_dir
 
