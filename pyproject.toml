@@ -26,6 +26,7 @@ feedparser = "^6.0"
 plotly = "^5.18"
 dbt-core = "^1.11.8"
 dbt-postgres = "^1.10.0"
+pyarrow = "^24.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

@@ -18,10 +18,12 @@ import sys
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
+import pandas as pd
 import structlog
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+from backtest import data_store
 from backtest.engine import BacktestConfig, BacktestResult, _load_all_features, run_backtest
 from backtest.exit_simulation import OHLCVBar
 from backtest.metrics import (
@@ -41,51 +43,35 @@ log = structlog.get_logger()
 
 
 def _load_bars(engine, symbol: str, start: datetime | None, end: datetime | None) -> list[OHLCVBar]:
-    clauses = ["symbol = :symbol"]
-    params: dict = {"symbol": symbol}
+    df = data_store.load_ohlcv(engine, symbol)
+    if df.empty:
+        return []
     if start is not None:
-        clauses.append("timestamp >= :start")
-        params["start"] = start
+        df = df[df["timestamp"] >= start]
     if end is not None:
-        clauses.append("timestamp <= :end")
-        params["end"] = end
-
-    query = text(f"""
-        SELECT timestamp, open, high, low, close
-        FROM raw.ohlcv
-        WHERE {' AND '.join(clauses)}
-        ORDER BY timestamp ASC
-    """)
-    with engine.connect() as conn:
-        rows = conn.execute(query, params).fetchall()
+        df = df[df["timestamp"] <= end]
     return [
         OHLCVBar(
-            timestamp=row.timestamp, open=float(row.open), high=float(row.high),
-            low=float(row.low), close=float(row.close),
+            timestamp=row.timestamp, open=row.open, high=row.high,
+            low=row.low, close=row.close,
         )
-        for row in rows
+        for row in df.itertuples()
     ]
 
 
 def _load_atr(engine, symbol: str, start: datetime | None, end: datetime | None) -> dict[datetime, float]:
-    clauses = ["symbol = :symbol"]
-    params: dict = {"symbol": symbol}
+    df = data_store.load_features(engine, symbol)
+    if df.empty:
+        return {}
     if start is not None:
-        clauses.append("timestamp >= :start")
-        params["start"] = start
+        df = df[df["timestamp"] >= start]
     if end is not None:
-        clauses.append("timestamp <= :end")
-        params["end"] = end
-
-    query = text(f"""
-        SELECT timestamp, range_14
-        FROM features.feat_technical
-        WHERE {' AND '.join(clauses)}
-        ORDER BY timestamp ASC
-    """)
-    with engine.connect() as conn:
-        rows = conn.execute(query, params).fetchall()
-    return {row.timestamp: float(row.range_14) for row in rows if row.range_14 is not None}
+        df = df[df["timestamp"] <= end]
+    return {
+        row.timestamp: row.range_14
+        for row in df.itertuples()
+        if pd.notna(row.range_14)
+    }
 
 
 def _feature_fingerprint(engine, symbols: list[str]) -> dict[str, tuple[int, str | None]]:

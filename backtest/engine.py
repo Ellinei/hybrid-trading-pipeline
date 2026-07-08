@@ -41,38 +41,24 @@ _DEFAULT_PERIODS_PER_YEAR = 24 * 365  # hourly bars, matches the live pipeline's
 def _load_all_features(db_engine, symbols: list[str]):
     """Pre-load all feat_technical rows + computed target column for walk-forward.
 
-    Queries the DB once per symbol (avoids N×retraining-boundary queries).
-    Returns a pandas DataFrame sorted by (symbol, timestamp) with an added
-    'target' column using the SAME label definition as MLSignalGenerator
-    (k-bar forward net return above cost). Rows without a known future
-    close are dropped.
+    Loads once per symbol via backtest.data_store (snapshot-backed, avoids
+    N×retraining-boundary queries). Returns a pandas DataFrame sorted by
+    (symbol, timestamp) with an added 'target' column using the SAME label
+    definition as MLSignalGenerator (k-bar forward net return above cost).
+    Rows without a known future close are dropped.
     """
     import pandas as pd
-    from sqlalchemy import text
+
+    from backtest import data_store
     from signals.ml_model import MLSignalGenerator
 
-    feat_cols = MLSignalGenerator.FEATURES
-    select_cols = ", ".join(["symbol", "timestamp", "close"] + feat_cols)
-
-    frames = []
-    for symbol in symbols:
-        query = text(
-            f"SELECT {select_cols} FROM features.feat_technical"
-            " WHERE symbol = :symbol ORDER BY timestamp ASC"
-        )
-        with db_engine.connect() as conn:
-            result = conn.execute(query, {"symbol": symbol})
-            df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
-        if not df.empty:
-            frames.append(df)
+    frames = [data_store.load_features(db_engine, symbol) for symbol in symbols]
+    frames = [f for f in frames if not f.empty]
 
     if not frames:
         return pd.DataFrame()
 
     full = pd.concat(frames, ignore_index=True).sort_values(["symbol", "timestamp"])
-    # Ensure timestamps are UTC-aware for comparison with bar timestamps
-    if not full["timestamp"].dt.tz:
-        full["timestamp"] = full["timestamp"].dt.tz_localize("UTC")
     horizon = MLSignalGenerator.LABEL_HORIZON_BARS
     full["future_close"] = full.groupby("symbol")["close"].shift(-horizon)
     full["target"] = MLSignalGenerator.compute_target(full["close"], full["future_close"])

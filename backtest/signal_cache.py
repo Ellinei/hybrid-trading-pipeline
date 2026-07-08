@@ -44,40 +44,24 @@ DEFAULT_WEIGHTS = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
 
 
 def load_feature_matrix(db_engine, symbols: list[str]):
-    """Load ALL feat_technical rows + label columns, one query per symbol.
+    """Load ALL feat_technical rows + label columns, via backtest.data_store
+    (snapshot-backed, one load per symbol).
 
     Unlike ``engine._load_all_features`` this keeps the final label-horizon
     rows (future_close = NaN) — they carry no training label but ARE the
     latest feature rows for signal generation near the end of history.
-    Feature columns are coerced to float (psycopg2 returns Decimal).
     """
     import pandas as pd
-    from sqlalchemy import text
 
-    feat_cols = MLSignalGenerator.FEATURES
-    select_cols = ", ".join(["symbol", "timestamp", "close"] + feat_cols)
+    from backtest import data_store
 
-    frames = []
-    for symbol in symbols:
-        query = text(
-            f"SELECT {select_cols} FROM features.feat_technical"
-            " WHERE symbol = :symbol ORDER BY timestamp ASC"
-        )
-        with db_engine.connect() as conn:
-            result = conn.execute(query, {"symbol": symbol})
-            df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
-        if not df.empty:
-            frames.append(df)
+    frames = [data_store.load_features(db_engine, symbol) for symbol in symbols]
+    frames = [f for f in frames if not f.empty]
 
     if not frames:
         return pd.DataFrame()
 
     full = pd.concat(frames, ignore_index=True).sort_values(["symbol", "timestamp"])
-    if not full["timestamp"].dt.tz:
-        full["timestamp"] = full["timestamp"].dt.tz_localize("UTC")
-    for col in feat_cols + ["close"]:
-        full[col] = full[col].astype(float)
-
     horizon = MLSignalGenerator.LABEL_HORIZON_BARS
     full["future_close"] = full.groupby("symbol")["close"].shift(-horizon)
     full["target"] = MLSignalGenerator.compute_target(full["close"], full["future_close"])

@@ -11,11 +11,19 @@ Run:
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
-from backtest.run_backtest import _compute_cache_key, _feature_fingerprint, _validate_cache_key
+from backtest.run_backtest import (
+    _compute_cache_key,
+    _feature_fingerprint,
+    _load_atr,
+    _load_bars,
+    _validate_cache_key,
+)
 
 
 def _key_kwargs(**overrides):
@@ -105,6 +113,79 @@ class TestFeatureFingerprint:
         result = _feature_fingerprint(engine, ["BTCUSDT"])
 
         assert result == {"BTCUSDT": (0, None)}
+
+
+class TestLoadBars:
+    """_load_bars now delegates to data_store.load_ohlcv (a snapshot-backed
+    full-history load) and applies start/end filtering itself in pandas,
+    instead of pushing the date range into SQL."""
+
+    def _ohlcv_df(self):
+        return pd.DataFrame({
+            "timestamp": [
+                datetime(2026, 1, 1, tzinfo=timezone.utc),
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+                datetime(2026, 1, 3, tzinfo=timezone.utc),
+            ],
+            "open": [100.0, 101.0, 102.0],
+            "high": [101.0, 102.0, 103.0],
+            "low": [99.0, 100.0, 101.0],
+            "close": [100.5, 101.5, 102.5],
+        })
+
+    def test_no_filter_returns_all_bars(self):
+        with patch("backtest.run_backtest.data_store.load_ohlcv", return_value=self._ohlcv_df()):
+            bars = _load_bars(MagicMock(), "BTCUSDT", None, None)
+
+        assert len(bars) == 3
+        assert bars[0].close == 100.5
+
+    def test_start_end_filter_bars_in_range(self):
+        with patch("backtest.run_backtest.data_store.load_ohlcv", return_value=self._ohlcv_df()):
+            bars = _load_bars(
+                MagicMock(), "BTCUSDT",
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
+        assert len(bars) == 1
+        assert bars[0].close == 101.5
+
+    def test_empty_snapshot_returns_empty_list(self):
+        with patch("backtest.run_backtest.data_store.load_ohlcv", return_value=pd.DataFrame()):
+            bars = _load_bars(MagicMock(), "BTCUSDT", None, None)
+
+        assert bars == []
+
+
+class TestLoadAtr:
+
+    def _features_df(self):
+        return pd.DataFrame({
+            "timestamp": [
+                datetime(2026, 1, 1, tzinfo=timezone.utc),
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+                datetime(2026, 1, 3, tzinfo=timezone.utc),
+            ],
+            "range_14": [1.5, float("nan"), 2.5],
+        })
+
+    def test_drops_nan_range_14(self):
+        with patch("backtest.run_backtest.data_store.load_features", return_value=self._features_df()):
+            atr = _load_atr(MagicMock(), "BTCUSDT", None, None)
+
+        assert len(atr) == 2
+        assert datetime(2026, 1, 2, tzinfo=timezone.utc) not in atr
+
+    def test_start_end_filter(self):
+        with patch("backtest.run_backtest.data_store.load_features", return_value=self._features_df()):
+            atr = _load_atr(
+                MagicMock(), "BTCUSDT",
+                datetime(2026, 1, 3, tzinfo=timezone.utc),
+                datetime(2026, 1, 3, tzinfo=timezone.utc),
+            )
+
+        assert atr == {datetime(2026, 1, 3, tzinfo=timezone.utc): 2.5}
 
 
 class TestValidateCacheKey:
