@@ -70,6 +70,7 @@ class MLSignalGenerator:
         self.scaler: StandardScaler  | None = None
         self.buy_prob_threshold = buy_prob_threshold
         self.sell_prob_threshold = sell_prob_threshold
+        self.last_grid_params_: dict | None = None
 
     # ------------------------------------------------------------------
     # Training
@@ -141,10 +142,13 @@ class MLSignalGenerator:
         y_tr, y_te = y[:split], y[split:]
 
         # Pipeline ensures StandardScaler is fit only on each CV training fold,
-        # preventing scale leakage into validation folds.
+        # preventing scale leakage into validation folds. Classifier runs
+        # single-threaded (n_jobs=1): GridSearchCV already parallelizes
+        # across the 40 fold fits (n_jobs=-1) below, so per-fit all-core
+        # threading would nest and oversubscribe.
         pipe = Pipeline([
             ("scaler", StandardScaler()),
-            ("clf", XGBClassifier(eval_metric="logloss", random_state=42)),
+            ("clf", XGBClassifier(eval_metric="logloss", random_state=42, n_jobs=1)),
         ])
         param_grid = {
             "clf__max_depth":     [3, 4],
@@ -264,12 +268,20 @@ class MLSignalGenerator:
     def is_trained_in_memory(self) -> bool:
         return getattr(self, "_trained_in_memory", False) and self.model is not None
 
-    def train_in_memory(self, df: pd.DataFrame) -> bool:
+    def train_in_memory(self, df: pd.DataFrame, params: dict | None = None) -> bool:
         """Train on a pre-loaded feature DataFrame without writing to disk.
 
         df must contain self.FEATURES columns plus 'target'.
         Returns True on success, False if df has insufficient rows for CV
         (requires n_splits+1 = 6 minimum) or missing columns.
+
+        When *params* is given (e.g. {"max_depth": 3, "n_estimators": 100,
+        "learning_rate": 0.05}), skips GridSearchCV entirely and fits a
+        single classifier with those hyperparameters — the walk-forward
+        precompute loop tunes once on the first window via a params=None
+        call, reads back ``last_grid_params_``, and passes it to every
+        subsequent window to avoid re-running an 8-combo x 5-fold search
+        ~35 times per run.
         """
         n_splits = 5
         required = self.FEATURES + ["target"]
@@ -279,17 +291,45 @@ class MLSignalGenerator:
             return False
 
         data = df[required].dropna()
-        if len(data) < n_splits + 1:
+        # Same floor for both paths: the frozen-params fit doesn't need CV
+        # folds, but a near-empty window (data gap, aggressive
+        # train_window_days) shouldn't silently produce a degenerate model
+        # either way.
+        min_rows = n_splits + 1
+        if len(data) < min_rows:
             log.warning("train_in_memory_insufficient_data",
-                        rows=len(data), required=n_splits + 1)
+                        rows=len(data), required=min_rows)
             return False
 
         X = data[self.FEATURES].values
         y = data["target"].to_numpy()
 
+        if params is not None:
+            pipe = Pipeline([
+                ("scaler", StandardScaler()),
+                ("clf", XGBClassifier(eval_metric="logloss", random_state=42,
+                                       n_jobs=-1, **params)),
+            ])
+            try:
+                pipe.fit(X, y)
+            except Exception as exc:
+                log.warning("train_in_memory_failed", error=str(exc))
+                return False
+
+            self.scaler = pipe.named_steps["scaler"]
+            self.model  = pipe.named_steps["clf"]
+            self._trained_in_memory = True
+            log.info("train_in_memory_complete_frozen_params", rows=len(data),
+                     params=params)
+            return True
+
+        # Classifier runs single-threaded (n_jobs=1) here: GridSearchCV
+        # already parallelizes across the 8x5=40 fold fits (n_jobs=-1), so
+        # letting each individual fit also spawn all-core threads causes
+        # nested oversubscription that slows the whole search down.
         pipe = Pipeline([
             ("scaler", StandardScaler()),
-            ("clf", XGBClassifier(eval_metric="logloss", random_state=42)),
+            ("clf", XGBClassifier(eval_metric="logloss", random_state=42, n_jobs=1)),
         ])
         param_grid = {
             "clf__max_depth":     [3, 4],
@@ -312,9 +352,26 @@ class MLSignalGenerator:
         self.scaler = grid.best_estimator_.named_steps["scaler"]
         self.model  = grid.best_estimator_.named_steps["clf"]
         self._trained_in_memory = True
+        self.last_grid_params_ = {
+            k.replace("clf__", ""): v for k, v in grid.best_params_.items()
+        }
         log.info("train_in_memory_complete", rows=len(data),
                  best_params=grid.best_params_)
         return True
+
+    def train_walk_forward(
+        self, slice_df: pd.DataFrame, frozen_params: dict | None
+    ) -> tuple[bool, dict | None]:
+        """One walk-forward retrain boundary: tunes via GridSearchCV only
+        when *frozen_params* is None (the first successful window), else
+        reuses it. Returns (trained, params_to_pass_in_next_call) — callers
+        thread the second value back in on every subsequent boundary instead
+        of each re-implementing the freeze/reuse bookkeeping themselves.
+        """
+        trained = self.train_in_memory(slice_df, params=frozen_params)
+        if trained and frozen_params is None:
+            frozen_params = self.last_grid_params_
+        return trained, frozen_params
 
     def generate_signal(self, symbol: str, as_of: datetime | None = None) -> Signal:
         now = as_of if as_of is not None else datetime.now(timezone.utc)
@@ -400,7 +457,7 @@ if __name__ == "__main__":
     metrics = gen.train(syms)
 
     if not metrics:
-        print("No training data. Run: rest_backfill → dbt run → signals.ml_model")
+        print("No training data. Run: rest_backfill -> dbt run -> signals.ml_model")
         sys.exit(1)
 
     print("\n=== Model Training Results ===")

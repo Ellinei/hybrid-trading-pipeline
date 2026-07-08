@@ -371,7 +371,7 @@ def main() -> None:
         with open(args.save_cache, "wb") as _f:
             pickle.dump({"prob_map": _prob_map_co, "feature_df": feature_df,
                          "bar_stream": _bar_stream_co, "meta": _meta_co}, _f)
-        print(f"  Cache saved → {args.save_cache} ({len(_prob_map_co)} entries)")
+        print(f"  Cache saved -> {args.save_cache} ({len(_prob_map_co)} entries)")
         engine.dispose()
         return
 
@@ -458,7 +458,7 @@ def main() -> None:
                  "bar_stream": _bar_stream_cs, "meta": _meta_cs},
                 _f,
             )
-        print(f"  Cache saved → {args.save_cache} ({len(_prob_map_cs)} entries)")
+        print(f"  Cache saved -> {args.save_cache} ({len(_prob_map_cs)} entries)")
 
     engine.dispose()
 

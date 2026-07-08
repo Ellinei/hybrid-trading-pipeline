@@ -362,6 +362,215 @@ class TestMLSignal:
         assert gen.model is not None
         assert gen.scaler is not None
 
+    def test_train_in_memory_with_explicit_params_skips_grid_search(self):
+        """When params are supplied, a single fit runs — no GridSearchCV.
+
+        This is the walk-forward speedup: tune once (first window), then
+        reuse the frozen params on every later window instead of re-running
+        an 8-combo x 5-fold search each time."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+        params = {"max_depth": 3, "n_estimators": 100, "learning_rate": 0.1}
+
+        with patch("signals.ml_model.GridSearchCV") as mock_grid:
+            result = gen.train_in_memory(df, params=params)
+
+        mock_grid.assert_not_called()
+        assert result is True
+        assert gen.model.get_params()["max_depth"] == 3
+        assert gen.model.get_params()["n_estimators"] == 100
+        assert gen.model.get_params()["learning_rate"] == 0.1
+
+    def test_train_in_memory_with_params_still_rejects_too_few_rows(self):
+        """The frozen-params fast path must not lower the data-sufficiency
+        floor: a thin walk-forward window (data gap, aggressive
+        train_window_days) should be skipped, not fit on near-nothing.
+        Same n_splits+1=6 minimum as the GridSearchCV path, even though the
+        frozen path itself doesn't need CV folds — the floor exists to avoid
+        degenerate models, not just to satisfy TimeSeriesSplit."""
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        df = pd.DataFrame(
+            [[0.0] * len(MLSignalGenerator.FEATURES)] * 3,
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = [0, 1, 0]
+        params = {"max_depth": 3, "n_estimators": 100, "learning_rate": 0.1}
+
+        result = gen.train_in_memory(df, params=params)
+
+        assert result is False
+        assert gen.model is None
+        assert gen.is_trained_in_memory() is False
+
+    def test_train_walk_forward_first_call_tunes_and_returns_frozen_params(self):
+        """First call (frozen_params=None): runs a full GridSearchCV and
+        returns the winning params for the caller to freeze and pass back
+        in on every later walk-forward boundary."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+
+        trained, frozen = gen.train_walk_forward(df, frozen_params=None)
+
+        assert trained is True
+        assert frozen is not None
+        assert set(frozen) == {"max_depth", "n_estimators", "learning_rate"}
+
+    def test_train_walk_forward_later_call_reuses_given_frozen_params(self):
+        """Later call (frozen_params already set): skips GridSearchCV
+        entirely and returns the same params unchanged — the caller doesn't
+        need to re-read last_grid_params_ itself."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+        given = {"max_depth": 3, "n_estimators": 100, "learning_rate": 0.1}
+
+        with patch("signals.ml_model.GridSearchCV") as mock_grid:
+            trained, frozen = gen.train_walk_forward(df, frozen_params=given)
+
+        mock_grid.assert_not_called()
+        assert trained is True
+        assert frozen == given
+
+    def test_train_walk_forward_failed_first_call_keeps_frozen_params_none(self):
+        """If the first window fails to train (too few rows), frozen_params
+        stays None so the NEXT boundary retries a full GridSearchCV instead
+        of permanently reusing nothing."""
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        df = pd.DataFrame(
+            [[0.0] * len(MLSignalGenerator.FEATURES)] * 3,
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = [0, 1, 0]
+
+        trained, frozen = gen.train_walk_forward(df, frozen_params=None)
+
+        assert trained is False
+        assert frozen is None
+
+    def test_train_in_memory_grid_search_records_best_params(self):
+        """Without explicit params, GridSearchCV still runs and the winning
+        params are captured on the instance so a caller (the walk-forward
+        precompute loop) can freeze and reuse them on subsequent windows."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+
+        result = gen.train_in_memory(df)
+
+        assert result is True
+        assert gen.last_grid_params_ is not None
+        assert set(gen.last_grid_params_) == {"max_depth", "n_estimators", "learning_rate"}
+
+    def test_grid_search_fit_uses_n_jobs_1_on_classifier(self):
+        """GridSearchCV parallelizes across folds (n_jobs=-1); the classifier
+        fit inside each fold must run single-threaded, or nested parallelism
+        oversubscribes cores and slows every fit down."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+
+        gen.train_in_memory(df)
+
+        assert gen.model.get_params()["n_jobs"] == 1
+
+    def test_frozen_param_fit_uses_n_jobs_minus_one(self):
+        """A single frozen-param fit has no CV fold parallelism to contend
+        with, so the classifier itself should use all cores."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+        params = {"max_depth": 3, "n_estimators": 100, "learning_rate": 0.1}
+
+        gen.train_in_memory(df, params=params)
+
+        assert gen.model.get_params()["n_jobs"] == -1
+
+    def test_train_classifier_uses_n_jobs_1_to_avoid_oversubscription(self, tmp_path, monkeypatch):
+        """train() (the disk-model path) runs the same nested
+        GridSearchCV(n_jobs=-1) pattern as train_in_memory — the classifier
+        must also run single-threaded to avoid oversubscription.
+
+        Writes real pickles to a tmp_path — NOT mocking builtins.open/pickle:
+        GridSearchCV(n_jobs=-1) spawns real OS worker processes (loky), whose
+        Windows pipe/semaphore IPC goes through open() internally; mocking
+        open globally deadlocks that IPC (observed: a real hang, 23 minutes
+        with near-zero CPU growth, had to be killed)."""
+        import numpy as np
+        import pandas as pd
+        from signals.ml_model import MLSignalGenerator
+
+        monkeypatch.setattr(MLSignalGenerator, "MODEL_PATH", str(tmp_path / "model.pkl"))
+        monkeypatch.setattr(MLSignalGenerator, "SCALER_PATH", str(tmp_path / "scaler.pkl"))
+
+        gen = MLSignalGenerator(MagicMock())
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame(
+            rng.standard_normal((200, len(MLSignalGenerator.FEATURES))),
+            columns=MLSignalGenerator.FEATURES,
+        )
+        df["target"] = (rng.random(200) > 0.5).astype(int)
+
+        with patch.object(MLSignalGenerator, "load_training_data", return_value=df):
+            gen.train(["BTCUSDT"])
+
+        assert gen.model.get_params()["n_jobs"] == 1
+
 
 # ===========================================================================
 # 4b. ML signal — as_of historical cutoff (for backtesting)

@@ -12,9 +12,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.model_selection import GridSearchCV
 
 from backtest.signal_cache import (
     FusionParams,
@@ -184,3 +187,22 @@ class TestPrecomputeWalkForwardProbs:
 
         nan_keys = [("BTCUSDT", _START + timedelta(hours=h)) for h in range(30, 72)]
         assert all(k not in probs for k in nan_keys)
+
+    def test_reuses_frozen_params_after_first_retrain(self):
+        """First retrain boundary tunes via GridSearchCV; every later
+        boundary reuses those frozen params — one search per run, not one
+        per window (~35 windows/run in a real walk-forward experiment)."""
+        n_rows = 33 * 24  # 33 days hourly: forces 2 retrain boundaries
+        df = _feature_df(n_rows)
+        bar_stream = [
+            (_START + timedelta(hours=h), "BTCUSDT") for h in range(n_rows)
+        ]
+
+        with patch("signals.ml_model.GridSearchCV", wraps=GridSearchCV) as mock_grid:
+            probs = precompute_walk_forward_probs(
+                df, bar_stream, min_train_days=1, walk_forward_months=1,
+            )
+
+        assert mock_grid.call_count == 1
+        assert probs
+        assert all(0.0 <= v <= 1.0 for v in probs.values())

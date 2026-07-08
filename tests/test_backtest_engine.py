@@ -224,9 +224,9 @@ class _HoldAggregatorWithML:
 
 class TestWalkForwardMode:
 
-    def test_walk_forward_retraining_boundary_calls_train_in_memory(self):
+    def test_walk_forward_retraining_boundary_calls_train_walk_forward(self):
         """With 91 bars at 1-day intervals, 30-day warm-up, monthly retraining:
-        train_in_memory fires at day-30 and day-60 boundaries (≥ 2 calls)."""
+        train_walk_forward fires at day-30 and day-60 boundaries (≥ 2 calls)."""
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         bars = [
             OHLCVBar(
@@ -242,7 +242,7 @@ class TestWalkForwardMode:
         atr_by_symbol = {"BTCUSDT": {b.timestamp: 5.0 for b in bars}}
 
         mock_ml = MagicMock()
-        mock_ml.train_in_memory.return_value = True
+        mock_ml.train_walk_forward.return_value = (True, {"max_depth": 3})
 
         feature_df = pd.DataFrame({
             "timestamp": [start + timedelta(days=d) for d in range(91)],
@@ -260,8 +260,8 @@ class TestWalkForwardMode:
         )
 
         mock_ml.set_walk_forward_mode.assert_called_once_with(True)
-        assert mock_ml.train_in_memory.call_count >= 2
-        assert len(result.retrain_events) == mock_ml.train_in_memory.call_count
+        assert mock_ml.train_walk_forward.call_count >= 2
+        assert len(result.retrain_events) == mock_ml.train_walk_forward.call_count
         assert all(e["trained"] for e in result.retrain_events)
         assert all("at" in e and "rows" in e for e in result.retrain_events)
 
@@ -282,7 +282,7 @@ class TestWalkForwardMode:
             start=bars[0].timestamp, end=bars[-1].timestamp,
         )
         mock_ml = MagicMock()
-        mock_ml.train_in_memory.return_value = True
+        mock_ml.train_walk_forward.return_value = (True, {"max_depth": 3})
         feature_df = pd.DataFrame({
             "timestamp": [b.timestamp for b in bars],
         })
@@ -299,7 +299,7 @@ class TestWalkForwardMode:
         )
 
         # First retrain fires at start+1day; slice must stop 'horizon' hours earlier
-        first_slice = mock_ml.train_in_memory.call_args_list[0][0][0]
+        first_slice = mock_ml.train_walk_forward.call_args_list[0][0][0]
         retrain_time = start + timedelta(days=1)
         assert first_slice["timestamp"].max() < retrain_time - timedelta(hours=horizon)
         assert len(first_slice) == 24 - horizon
@@ -320,7 +320,7 @@ class TestWalkForwardMode:
             start=bars[0].timestamp, end=bars[-1].timestamp,
         )
         mock_ml = MagicMock()
-        mock_ml.train_in_memory.return_value = True
+        mock_ml.train_walk_forward.return_value = (True, {"max_depth": 3})
         feature_df = pd.DataFrame({
             "timestamp": [b.timestamp for b in bars],
         })
@@ -338,7 +338,7 @@ class TestWalkForwardMode:
         )
 
         # Retrain at start+2d, label cutoff = 2d - horizon, window = 24h before that
-        first_slice = mock_ml.train_in_memory.call_args_list[0][0][0]
+        first_slice = mock_ml.train_walk_forward.call_args_list[0][0][0]
         label_cutoff = start + timedelta(days=2) - timedelta(hours=horizon)
         assert len(first_slice) == 24
         assert first_slice["timestamp"].min() == label_cutoff - timedelta(days=1)
@@ -372,7 +372,7 @@ class TestWalkForwardMode:
             start=bars[0].timestamp, end=bars[-1].timestamp,
         )
         mock_ml = MagicMock()
-        mock_ml.train_in_memory.return_value = False
+        mock_ml.train_walk_forward.return_value = (False, None)
         feature_df = pd.DataFrame({"timestamp": [b.timestamp for b in bars]})
 
         result = run_backtest(
@@ -388,3 +388,56 @@ class TestWalkForwardMode:
 
         assert any("out-of-sample" in w for w in result.warnings)
         assert not any("training-on-test" in w for w in result.warnings)
+
+    def test_reuses_frozen_params_after_first_retrain(self):
+        """The inline retrain loop must tune once (first boundary) and reuse
+        those params on every later boundary — mirrors the signal_cache
+        precompute path so both walk-forward code paths behave consistently
+        and pay the ~40-fit GridSearchCV cost once per run, not once per
+        window (~35 windows/run in a real experiment)."""
+        from unittest.mock import patch
+
+        import numpy as np
+        from sklearn.model_selection import GridSearchCV
+
+        from signals.ml_model import MLSignalGenerator
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        n_rows = 33 * 24  # 33 days hourly: forces 2 retrain boundaries
+        bars = [
+            OHLCVBar(timestamp=start + timedelta(hours=h),
+                     open=100.0, high=101.0, low=99.0, close=100.0)
+            for h in range(n_rows)
+        ]
+        config = BacktestConfig(
+            symbols=["BTCUSDT"],
+            start=bars[0].timestamp, end=bars[-1].timestamp,
+        )
+        rng = np.random.default_rng(7)
+        feature_df = pd.DataFrame({
+            col: rng.standard_normal(n_rows) for col in MLSignalGenerator.FEATURES
+        })
+        feature_df["symbol"] = "BTCUSDT"
+        feature_df["timestamp"] = [b.timestamp for b in bars]
+        feature_df["close"] = 100.0 + rng.standard_normal(n_rows).cumsum()
+        horizon = MLSignalGenerator.LABEL_HORIZON_BARS
+        feature_df["future_close"] = feature_df["close"].shift(-horizon)
+        feature_df["target"] = MLSignalGenerator.compute_target(
+            feature_df["close"], feature_df["future_close"]
+        )
+
+        real_ml = MLSignalGenerator(db_engine=None)
+
+        with patch("signals.ml_model.GridSearchCV", wraps=GridSearchCV) as mock_grid:
+            run_backtest(
+                bars_by_symbol={"BTCUSDT": bars},
+                atr_by_symbol={"BTCUSDT": {b.timestamp: 5.0 for b in bars}},
+                filters_by_symbol={},
+                aggregator=_HoldAggregatorWithML(real_ml),
+                config=config,
+                walk_forward_months=1,
+                min_train_days=1,
+                feature_df=feature_df,
+            )
+
+        assert mock_grid.call_count == 1

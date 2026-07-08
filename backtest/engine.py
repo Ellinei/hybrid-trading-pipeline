@@ -219,6 +219,7 @@ def run_backtest(
     ml_gen = getattr(aggregator, "ml", None)
     next_retrain_at: datetime | None = None
     wf_active = walk_forward_months > 0 and ml_gen is not None
+    frozen_params: dict | None = None
 
     if wf_active:
         if feature_df is None and db_engine is not None:
@@ -258,7 +259,11 @@ def run_backtest(
                     window_start = label_cutoff - timedelta(days=train_window_days)
                     mask &= feature_df["timestamp"] >= window_start
                 slice_df = feature_df[mask].copy()
-                trained = ml_gen.train_in_memory(slice_df)
+                # Tune once (first boundary, full GridSearchCV) then freeze
+                # — mirrors backtest.signal_cache.precompute_walk_forward_probs
+                # so both walk-forward code paths behave consistently and
+                # pay the ~40-fit search once per run, not once per window.
+                trained, frozen_params = ml_gen.train_walk_forward(slice_df, frozen_params)
                 retrain_events.append(
                     {"at": timestamp, "rows": len(slice_df), "trained": trained}
                 )

@@ -123,6 +123,7 @@ def precompute_walk_forward_probs(
     pending: list[tuple[str, datetime]] = []
     next_retrain_at: datetime | None = None
     model_ready = False
+    frozen_params: dict | None = None
 
     def _flush_pending() -> None:
         """Batch-predict prob_up for all pending bars with the current model."""
@@ -164,7 +165,11 @@ def precompute_walk_forward_probs(
             if train_window_days > 0:
                 mask &= feature_df["timestamp"] >= label_cutoff - timedelta(days=train_window_days)
             slice_df = feature_df[mask].copy()
-            if ml.train_in_memory(slice_df):
+            # Tune once (first boundary, full GridSearchCV) then freeze —
+            # ~35 windows/run previously each ran an 8x5-fold search
+            # (~1,400 fits/run); every later boundary now does one fit.
+            trained, frozen_params = ml.train_walk_forward(slice_df, frozen_params)
+            if trained:
                 model_ready = True
                 log.info("cache_walk_forward_retrained", at=str(ts), rows=len(slice_df))
             else:

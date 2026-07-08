@@ -44,6 +44,9 @@ select = ["E", "F", "I", "W", "N", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=. --cov-report=html --cov-report=term-missing"
+markers = [
+    "golden: integration test against a live TimescaleDB; self-skips if DB/cache/baseline unavailable",
+]
 
 [tool.coverage.run]
 omit = ["tests/*", ".venv/*"]
