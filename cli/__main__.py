@@ -15,9 +15,11 @@ Usage:
     python -m cli features
     python -m cli dashboard
     python -m cli verify-parity
+    python -m cli experiment --id exp008 --ml-buy-threshold 0.55 --max-hold-bars 24
 """
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -31,7 +33,7 @@ _SUBCOMMANDS = {
     "trade": "execution.bot_runner",
 }
 
-_SPECIAL = ("features", "dashboard", "verify-parity")
+_SPECIAL = ("features", "dashboard", "verify-parity", "experiment")
 
 
 def _print_help() -> None:
@@ -66,6 +68,63 @@ def _run_features(rest: list[str]) -> int:
     return 0
 
 
+def _parse_experiment_args(rest: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="cli experiment",
+        description="Resolve/build the prob cache, replay, write results/<id>/ artifacts.",
+    )
+    parser.add_argument("--id", required=True, dest="exp_id")
+    parser.add_argument("--symbols", type=str, default=None,
+                         help="Comma-separated symbols (default: TRADING_SYMBOLS env)")
+    parser.add_argument("--buy-gate", type=float, default=0.15)
+    parser.add_argument("--sell-gate", type=float, default=-0.15)
+    parser.add_argument("--ml-buy-threshold", type=float, default=0.65)
+    parser.add_argument("--ml-sell-threshold", type=float, default=0.35)
+    parser.add_argument("--bb-guard", action="store_true", default=False)
+    parser.add_argument("--require-uptrend", action="store_true", default=False)
+    parser.add_argument("--max-hold-bars", type=int, default=0)
+    parser.add_argument("--min-train-days", type=int, default=60)
+    parser.add_argument("--walk-forward", type=int, default=1, dest="walk_forward_months")
+    parser.add_argument("--train-window-days", type=int, default=540)
+    parser.add_argument("--output-dir", type=str, default="results")
+    return parser.parse_args(rest)
+
+
+def _run_experiment(rest: list[str]) -> int:
+    from backtest.experiment import ExperimentConfig, run_experiment
+    from backtest.run_backtest import build_engine
+
+    args = _parse_experiment_args(rest)
+    engine = build_engine()
+    symbols = (
+        [s.strip() for s in args.symbols.split(",") if s.strip()]
+        if args.symbols else
+        [s.strip() for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
+    )
+    cfg = ExperimentConfig(
+        exp_id=args.exp_id, symbols=symbols,
+        buy_gate=args.buy_gate, sell_gate=args.sell_gate,
+        ml_buy_threshold=args.ml_buy_threshold, ml_sell_threshold=args.ml_sell_threshold,
+        bb_guard=args.bb_guard, require_uptrend=args.require_uptrend,
+        max_hold_bars=args.max_hold_bars, min_train_days=args.min_train_days,
+        walk_forward_months=args.walk_forward_months, train_window_days=args.train_window_days,
+        output_dir=args.output_dir,
+    )
+
+    metrics = run_experiment(engine, cfg)
+    engine.dispose()
+
+    print(f"\n=== {args.exp_id} ===")
+    print(f"  Trades         : {metrics['trade_count']}")
+    print(f"  Win rate       : {metrics['win_rate']:.2%}")
+    print(f"  Profit factor  : {metrics['profit_factor']:.2f}")
+    print(f"  Expectancy     : ${metrics['expectancy']:.2f}/trade")
+    print(f"  Max drawdown   : {metrics['max_drawdown']:.2%}")
+    print(f"  Sharpe ratio   : {metrics['sharpe_ratio']:.2f}")
+    print(f"  Artifacts      : {metrics['_output_dir']}/")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
@@ -77,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if subcommand == "features":
         return _run_features(rest)
+    if subcommand == "experiment":
+        return _run_experiment(rest)
     if subcommand == "dashboard":
         result = subprocess.run([sys.executable, "-m", "streamlit", "run", "dashboard/app.py"])
         return result.returncode

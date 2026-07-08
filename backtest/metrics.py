@@ -105,6 +105,35 @@ def per_window_metrics(
     return windows
 
 
+def per_symbol_metrics(trades: list[dict]) -> dict[str, dict]:
+    """PF/win_rate/trade_count/pnl per symbol — the LOSO breakdown used
+    throughout the experiment ledger to check a winner isn't propped up by
+    a single symbol."""
+    by_symbol: dict[str, list[dict]] = {}
+    for t in trades:
+        by_symbol.setdefault(t["symbol"], []).append(t)
+    return {
+        symbol: {
+            "trade_count": len(ts),
+            "profit_factor": profit_factor(ts),
+            "win_rate": win_rate(ts),
+            "pnl": sum(t["pnl"] for t in ts),
+        }
+        for symbol, ts in by_symbol.items()
+    }
+
+
+def max_single_trade_profit_share(trades: list[dict]) -> float:
+    """Largest single winning trade's share of gross profit — the
+    acceptance rule's '>40% of gross profit from one trade' concentration
+    guard, i.e. is a passing PF actually one lucky trade carrying the rest."""
+    wins = [t["pnl"] for t in trades if t["pnl"] > 0]
+    gross_profit = sum(wins)
+    if gross_profit <= 0:
+        return 0.0
+    return max(wins) / gross_profit
+
+
 def sharpe_ratio(
     equity_curve: list[tuple[datetime, float]], periods_per_year: float
 ) -> float:

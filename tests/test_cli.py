@@ -63,6 +63,39 @@ class TestSubcommandForwarding:
         )
 
 
+class TestExperimentSubcommand:
+
+    def _fake_metrics(self):
+        return {
+            "trade_count": 5, "win_rate": 0.6, "profit_factor": 1.2,
+            "expectancy": 1.5, "max_drawdown": 0.05, "sharpe_ratio": 0.4,
+            "_output_dir": "results/exp999",
+        }
+
+    def test_builds_config_from_args_and_calls_run_experiment(self):
+        with patch("backtest.run_backtest.build_engine") as mock_build_engine, \
+             patch("backtest.experiment.run_experiment", return_value=self._fake_metrics()) as mock_run:
+            code = main([
+                "experiment", "--id", "exp999",
+                "--ml-buy-threshold", "0.55", "--max-hold-bars", "24",
+                "--symbols", "BTCUSDT,ETHUSDT",
+            ])
+
+        assert code == 0
+        mock_build_engine.assert_called_once()
+        cfg = mock_run.call_args[0][1]
+        assert cfg.exp_id == "exp999"
+        assert cfg.ml_buy_threshold == 0.55
+        assert cfg.max_hold_bars == 24
+        assert cfg.symbols == ["BTCUSDT", "ETHUSDT"]
+
+    def test_missing_id_is_a_usage_error(self):
+        with patch("backtest.run_backtest.build_engine"), \
+             patch("backtest.experiment.run_experiment"):
+            with pytest.raises(SystemExit):
+                main(["experiment"])
+
+
 class TestUnknownAndEmptyInvocation:
 
     def test_unknown_subcommand_returns_nonzero_without_subprocess(self):

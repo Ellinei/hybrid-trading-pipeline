@@ -179,6 +179,23 @@ def _build_cache_meta(
     return meta
 
 
+def build_engine():
+    """Shared Postgres engine construction — was independently copy-pasted
+    across run_backtest.py, sweep.py, ml_model.py, bot_runner.py, and
+    others; new callers (e.g. cli experiment) should use this instead of
+    adding another copy."""
+    load_dotenv()
+    return create_engine(
+        "postgresql+psycopg2://{u}:{p}@{h}:{port}/{db}".format(
+            u=quote_plus(os.getenv("POSTGRES_USER",     "trader")),
+            p=quote_plus(os.getenv("POSTGRES_PASSWORD", "")),
+            h=os.getenv("POSTGRES_HOST", "localhost"),
+            port=os.getenv("POSTGRES_PORT", "5432"),
+            db=os.getenv("POSTGRES_DB",   "trading"),
+        )
+    )
+
+
 def _print_report(symbols: list[str], result: BacktestResult) -> None:
     print(f"\n=== Backtest Report ({', '.join(symbols)}) ===")
     print(f"  Trades         : {result.metrics['trade_count']}")
@@ -357,16 +374,7 @@ def main() -> None:
         print(f"  Label override: horizon={MLSignalGenerator.LABEL_HORIZON_BARS} bars, "
               f"min_return={MLSignalGenerator.LABEL_MIN_RETURN}")
 
-    load_dotenv()
-    engine = create_engine(
-        "postgresql+psycopg2://{u}:{p}@{h}:{port}/{db}".format(
-            u=quote_plus(os.getenv("POSTGRES_USER",     "trader")),
-            p=quote_plus(os.getenv("POSTGRES_PASSWORD", "")),
-            h=os.getenv("POSTGRES_HOST", "localhost"),
-            port=os.getenv("POSTGRES_PORT", "5432"),
-            db=os.getenv("POSTGRES_DB",   "trading"),
-        )
-    )
+    engine = build_engine()
 
     symbols = (
         [s.strip() for s in args.symbols.split(",") if s.strip()]

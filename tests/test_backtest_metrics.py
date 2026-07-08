@@ -14,6 +14,8 @@ from backtest.metrics import (
     expectancy,
     holding_hours_stats,
     max_drawdown,
+    max_single_trade_profit_share,
+    per_symbol_metrics,
     per_window_metrics,
     profit_factor,
     sharpe_ratio,
@@ -166,3 +168,42 @@ class TestSharpeRatio:
     def test_fewer_than_two_points_returns_zero(self):
         assert sharpe_ratio(_equity_curve([1000.0]), periods_per_year=24 * 365) == 0.0
         assert sharpe_ratio([], periods_per_year=24 * 365) == 0.0
+
+
+class TestPerSymbolMetrics:
+    """The LOSO breakdown used throughout the experiment ledger."""
+
+    def test_splits_trades_by_symbol(self):
+        trades = [
+            {"symbol": "BTCUSDT", "pnl": 10.0},
+            {"symbol": "BTCUSDT", "pnl": -4.0},
+            {"symbol": "ETHUSDT", "pnl": 5.0},
+        ]
+        result = per_symbol_metrics(trades)
+
+        assert set(result) == {"BTCUSDT", "ETHUSDT"}
+        assert result["BTCUSDT"]["trade_count"] == 2
+        assert result["BTCUSDT"]["pnl"] == pytest.approx(6.0)
+        assert result["ETHUSDT"]["trade_count"] == 1
+        assert result["ETHUSDT"]["profit_factor"] == float("inf")
+
+    def test_empty_trades_returns_empty_dict(self):
+        assert per_symbol_metrics([]) == {}
+
+
+class TestMaxSingleTradeProfitShare:
+    """The acceptance rule's '>40% of gross profit from one trade' guard."""
+
+    def test_one_dominant_trade(self):
+        trades = [{"pnl": 100.0}, {"pnl": 10.0}, {"pnl": 5.0}, {"pnl": -20.0}]
+        assert max_single_trade_profit_share(trades) == pytest.approx(100.0 / 115.0)
+
+    def test_evenly_split_profit(self):
+        trades = [{"pnl": 10.0}, {"pnl": 10.0}]
+        assert max_single_trade_profit_share(trades) == pytest.approx(0.5)
+
+    def test_no_winning_trades_returns_zero(self):
+        assert max_single_trade_profit_share([{"pnl": -5.0}, {"pnl": -1.0}]) == 0.0
+
+    def test_no_trades_returns_zero(self):
+        assert max_single_trade_profit_share([]) == 0.0
