@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import os
 import pickle
+import sys
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
@@ -83,6 +86,111 @@ def _load_atr(engine, symbol: str, start: datetime | None, end: datetime | None)
     with engine.connect() as conn:
         rows = conn.execute(query, params).fetchall()
     return {row.timestamp: float(row.range_14) for row in rows if row.range_14 is not None}
+
+
+def _feature_fingerprint(engine, symbols: list[str]) -> dict[str, tuple[int, str | None]]:
+    """Cheap per-symbol (row_count, max_timestamp) snapshot of feat_technical.
+
+    Used as a proxy for "has the underlying feature data changed since a
+    prob cache was built" without re-reading the whole table — a count(*)
+    and max(timestamp) aggregate query rather than the full feature load.
+    """
+    fingerprint: dict[str, tuple[int, str | None]] = {}
+    for symbol in symbols:
+        query = text(
+            "SELECT COUNT(*), MAX(timestamp) FROM features.feat_technical WHERE symbol = :symbol"
+        )
+        with engine.connect() as conn:
+            count, max_ts = conn.execute(query, {"symbol": symbol}).fetchone()
+        fingerprint[symbol] = (count, str(max_ts) if max_ts is not None else None)
+    return fingerprint
+
+
+def _compute_cache_key(
+    *,
+    label_horizon: int,
+    label_min_return: float,
+    min_train_days: int,
+    walk_forward_months: int,
+    train_window_days: int,
+    symbols: list[str],
+    fingerprint: dict[str, tuple[int, str | None]],
+) -> str:
+    """Content-addressed key over everything that determines what a prob
+    cache SHOULD contain. Deliberately excludes tuned hyperparameters
+    (frozen_params) — those are an output of building the cache from these
+    inputs, not an input themselves, and are already fully determined by
+    them (tuning is deterministic given the same feature data and schedule).
+    """
+    payload = {
+        "label_horizon": label_horizon,
+        "label_min_return": label_min_return,
+        "min_train_days": min_train_days,
+        "walk_forward_months": walk_forward_months,
+        "train_window_days": train_window_days,
+        "symbols": sorted(symbols),
+        "fingerprint": {sym: list(fingerprint[sym]) for sym in sorted(fingerprint)},
+    }
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_cache_key(meta: dict, expected_key: str, force: bool) -> tuple[bool, str]:
+    """Decide whether a --load-cache run may proceed.
+
+    Returns (ok, message). ok=False means the caller should print message
+    and exit without running — a genuine mismatch (stale cache: symbols,
+    labels, schedule, or the underlying feature data changed) unless
+    *force* is set. A cache with no "cache_key" in its meta predates this
+    mechanism and is treated as unverifiable, not mismatched — it must not
+    hard-fail, or every already-built cache breaks on first use.
+    """
+    cached_key = meta.get("cache_key")
+    if cached_key is None:
+        return True, (
+            "WARNING: cache has no content key (built by an older run) — "
+            "cannot verify it matches current symbols/labels/data; proceeding"
+        )
+    if cached_key == expected_key:
+        return True, ""
+    if force:
+        return True, (
+            f"WARNING: cache key mismatch (cached={cached_key[:12]}, "
+            f"expected={expected_key[:12]}) — proceeding anyway (--force)"
+        )
+    return False, (
+        f"ERROR: cache key mismatch (cached={cached_key[:12]}, "
+        f"expected={expected_key[:12]}) — symbols, labels, min_train_days, "
+        f"train_window_days, or the underlying feature data changed since "
+        f"this cache was built. Rebuild it (--cache-only) or pass --force "
+        f"to proceed anyway."
+    )
+
+
+def _build_cache_meta(
+    engine, symbols: list[str], min_train_days: int,
+    walk_forward_months: int, train_window_days: int,
+) -> dict:
+    """Meta dict stored alongside a saved prob cache, including its
+    content-addressed key (see _compute_cache_key)."""
+    meta = {
+        "label_horizon": MLSignalGenerator.LABEL_HORIZON_BARS,
+        "label_min_return": MLSignalGenerator.LABEL_MIN_RETURN,
+        "min_train_days": min_train_days,
+        "walk_forward_months": walk_forward_months,
+        "train_window_days": train_window_days,
+        "symbols": symbols,
+    }
+    meta["cache_key"] = _compute_cache_key(
+        label_horizon=meta["label_horizon"],
+        label_min_return=meta["label_min_return"],
+        min_train_days=min_train_days,
+        walk_forward_months=walk_forward_months,
+        train_window_days=train_window_days,
+        symbols=symbols,
+        fingerprint=_feature_fingerprint(engine, symbols),
+    )
+    return meta
 
 
 def _print_report(symbols: list[str], result: BacktestResult) -> None:
@@ -247,6 +355,10 @@ def main() -> None:
                          help="Precompute and save the walk-forward prob cache (--save-cache required) "
                               "then exit — skips the full backtest simulation (~15 min vs ~50 min). "
                               "Use once to build the cache; then sweep variants with --load-cache.")
+    parser.add_argument("--force", action="store_true", default=False,
+                         help="With --load-cache: proceed even if the cache's content key doesn't "
+                              "match current symbols/labels/schedule/feature-data (normally a hard "
+                              "error — the cache may no longer reflect what it's replaying).")
     args = parser.parse_args()
 
     if args.label_horizon is not None or args.label_min_return is not None:
@@ -357,14 +469,9 @@ def main() -> None:
             walk_forward_months=_wf_co,
             train_window_days=args.train_window_days,
         )
-        _meta_co = {
-            "label_horizon": MLSignalGenerator.LABEL_HORIZON_BARS,
-            "label_min_return": MLSignalGenerator.LABEL_MIN_RETURN,
-            "min_train_days": min_train_days,
-            "walk_forward_months": _wf_co,
-            "train_window_days": args.train_window_days,
-            "symbols": symbols,
-        }
+        _meta_co = _build_cache_meta(
+            engine, symbols, min_train_days, _wf_co, args.train_window_days,
+        )
         _cache_dir_co = os.path.dirname(args.save_cache)
         if _cache_dir_co:
             os.makedirs(_cache_dir_co, exist_ok=True)
@@ -385,11 +492,31 @@ def main() -> None:
         _meta = _cache.get("meta", {})
         _cached_h = _meta.get("label_horizon", MLSignalGenerator.LABEL_HORIZON_BARS)
         _cached_r = _meta.get("label_min_return", MLSignalGenerator.LABEL_MIN_RETURN)
-        if (_cached_h != MLSignalGenerator.LABEL_HORIZON_BARS
-                or _cached_r != MLSignalGenerator.LABEL_MIN_RETURN):
-            print(f"  WARNING: cache label (h={_cached_h}/r={_cached_r}) != "
-                  f"current (h={MLSignalGenerator.LABEL_HORIZON_BARS}/"
-                  f"r={MLSignalGenerator.LABEL_MIN_RETURN}) — results may differ")
+        # The walk-forward schedule (min_train_days/walk_forward_months/
+        # train_window_days) is baked into the cache at build time and isn't
+        # meant to be overridden at load time (--load-cache mode is for
+        # sweeping fusion params like --ml-buy-threshold, not the schedule)
+        # — so re-derive the expected key from what the cache SAYS it was
+        # built with, not from this invocation's (likely default) args.
+        # Symbols and label constants, by contrast, legitimately vary
+        # between the build and a later replay and are checked against the
+        # CURRENT values — a genuine divergence there is exactly the class
+        # of bug this key is meant to catch.
+        _expected_key = _compute_cache_key(
+            label_horizon=MLSignalGenerator.LABEL_HORIZON_BARS,
+            label_min_return=MLSignalGenerator.LABEL_MIN_RETURN,
+            min_train_days=_meta.get("min_train_days", min_train_days),
+            walk_forward_months=_meta.get("walk_forward_months", 1),
+            train_window_days=_meta.get("train_window_days", args.train_window_days),
+            symbols=symbols,
+            fingerprint=_feature_fingerprint(engine, symbols),
+        )
+        _ok, _msg = _validate_cache_key(_meta, _expected_key, args.force)
+        if _msg:
+            print(f"  {_msg}")
+        if not _ok:
+            engine.dispose()
+            sys.exit(1)
         print(f"  Cache: {len(_prob_map)} prob entries, label h={_cached_h}/r={_cached_r}")
         _fusion = FusionParams(
             buy_gate=args.buy_gate,
@@ -441,14 +568,9 @@ def main() -> None:
             walk_forward_months=_wf_cs,
             train_window_days=args.train_window_days,
         )
-        _meta_cs = {
-            "label_horizon": MLSignalGenerator.LABEL_HORIZON_BARS,
-            "label_min_return": MLSignalGenerator.LABEL_MIN_RETURN,
-            "min_train_days": min_train_days,
-            "walk_forward_months": _wf_cs,
-            "train_window_days": args.train_window_days,
-            "symbols": symbols,
-        }
+        _meta_cs = _build_cache_meta(
+            engine, symbols, min_train_days, _wf_cs, args.train_window_days,
+        )
         _cache_dir = os.path.dirname(args.save_cache)
         if _cache_dir:
             os.makedirs(_cache_dir, exist_ok=True)
