@@ -87,6 +87,9 @@ def _parse_experiment_args(rest: list[str]) -> argparse.Namespace:
     parser.add_argument("--walk-forward", type=int, default=1, dest="walk_forward_months")
     parser.add_argument("--train-window-days", type=int, default=540)
     parser.add_argument("--output-dir", type=str, default="results")
+    parser.add_argument("--regime", type=str, default=None, dest="regime_candidate",
+                         help="Phase 12 regime candidate key (r1_sma200, r2_hysteresis_cross, "
+                              "r3_vol_percentile, r4_composite) or omit to disable the gate")
     return parser.parse_args(rest)
 
 
@@ -108,7 +111,7 @@ def _run_experiment(rest: list[str]) -> int:
         bb_guard=args.bb_guard, require_uptrend=args.require_uptrend,
         max_hold_bars=args.max_hold_bars, min_train_days=args.min_train_days,
         walk_forward_months=args.walk_forward_months, train_window_days=args.train_window_days,
-        output_dir=args.output_dir,
+        output_dir=args.output_dir, regime_candidate=args.regime_candidate,
     )
 
     metrics = run_experiment(engine, cfg)
@@ -120,6 +123,8 @@ def _run_experiment(rest: list[str]) -> int:
     print(f"  Profit factor  : {metrics['profit_factor']:.2f}")
     print(f"  Expectancy     : ${metrics['expectancy']:.2f}/trade")
     print(f"  Max drawdown   : {metrics['max_drawdown']:.2%}")
+    if "regime_days_blocked_pct" in metrics:
+        print(f"  Days blocked   : {metrics['regime_days_blocked_pct']:.1f}%")
     print(f"  Sharpe ratio   : {metrics['sharpe_ratio']:.2f}")
     print(f"  Artifacts      : {metrics['_output_dir']}/")
     return 0

@@ -48,6 +48,7 @@ class SignalAggregator:
         sell_gate: float = -0.15,
         technical: TechnicalSignalGenerator | None = None,
         ml: MLSignalGenerator | None = None,
+        regime: dict | None = None,
     ) -> None:
         """*buy_gate*/*sell_gate* are the fused-score direction thresholds.
         The sell gate is the strategy's de facto exit threshold: SELL
@@ -55,7 +56,14 @@ class SignalAggregator:
         below *sell_gate* closes an open position.
 
         Pass pre-built *technical*/*ml* generators to inject non-default
-        rule/threshold parameters (backtest sweeps, A/B toggles)."""
+        rule/threshold parameters (backtest sweeps, A/B toggles).
+
+        *regime* is an optional dict[date, RegimeState] (signals.regime,
+        Phase 12) — a daily BTC macro regime gate that blocks new BUYs
+        when RISK_OFF. Mirrors ReplayAggregator's identical gate so
+        backtest and live share the same semantics. None (the default)
+        is a no-op — not yet enabled by default; Phase 13 wires it on via
+        StrategyConfig."""
         self.weights   = weights or DEFAULT_WEIGHTS
         self.buy_gate  = buy_gate
         self.sell_gate = sell_gate
@@ -63,6 +71,7 @@ class SignalAggregator:
         self.ml        = ml or MLSignalGenerator(db_engine)
         self.sentiment = SentimentSignalGenerator()
         self._neutral_sentiment = NeutralSentimentSignalGenerator()
+        self._regime = regime
 
     # ------------------------------------------------------------------
     # Core fusion
@@ -107,6 +116,16 @@ class SignalAggregator:
             direction = SignalDirection.SELL
         else:
             direction = SignalDirection.HOLD
+
+        # Regime gate: blocks new BUYs in a RISK_OFF macro regime; never
+        # blocks SELL (exits must always work) or an already-HOLD signal.
+        # getattr, not self._regime: existing tests construct this class
+        # via __new__ (bypassing __init__) and don't set the attribute.
+        regime = getattr(self, "_regime", None)
+        if direction == SignalDirection.BUY and regime is not None:
+            from signals.regime import RegimeState
+            if regime.get(now.date()) == RegimeState.RISK_OFF:
+                direction = SignalDirection.HOLD
 
         confidence = min(abs(score), 1.0)
 

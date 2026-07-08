@@ -21,11 +21,13 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from backtest.exit_simulation import OHLCVBar
 from backtest.experiment import (
     ExperimentConfig,
     _build_ledger_row,
     _cache_path_for_key,
     _compute_metrics,
+    _resolve_regime,
     _write_artifacts,
     resolve_prob_cache,
 )
@@ -188,6 +190,61 @@ class TestComputeMetrics:
                     "exit_reason_breakdown", "holding_hours", "per_symbol",
                     "max_single_trade_profit_share"):
             assert key in metrics
+
+    def test_no_regime_days_blocked_key_when_regime_not_given(self):
+        assert "regime_days_blocked_pct" not in _compute_metrics(_sample_result())
+
+    def test_regime_days_blocked_key_present_when_regime_given(self):
+        from signals.regime import RegimeState
+
+        result = _sample_result()
+        regime = {datetime(2026, 1, 1).date(): RegimeState.RISK_OFF,
+                  datetime(2026, 1, 2).date(): RegimeState.RISK_ON}
+
+        metrics = _compute_metrics(result, regime)
+
+        assert metrics["regime_days_blocked_pct"] == pytest.approx(50.0)
+
+
+class TestResolveRegime:
+
+    def _btc_bars(self, n_days=60):
+        bars = []
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for d in range(n_days):
+            bars.append(OHLCVBar(
+                timestamp=start + pd.Timedelta(days=d), open=100.0, high=101.0,
+                low=99.0, close=100.0 + d * 0.1,
+            ))
+        return bars
+
+    def test_none_candidate_returns_none(self):
+        cfg = ExperimentConfig(exp_id="exp008", regime_candidate=None)
+        assert _resolve_regime(MagicMock(), cfg, bars_by_symbol={}) is None
+
+    def test_unknown_candidate_raises(self):
+        cfg = ExperimentConfig(exp_id="exp008", regime_candidate="not_a_real_candidate")
+        with pytest.raises(ValueError, match="Unknown regime candidate"):
+            _resolve_regime(MagicMock(), cfg, bars_by_symbol={"BTCUSDT": self._btc_bars()})
+
+    def test_uses_already_loaded_btc_bars_without_requerying(self):
+        cfg = ExperimentConfig(exp_id="exp008", regime_candidate="r1_sma200")
+        engine = MagicMock()
+
+        regime = _resolve_regime(engine, cfg, bars_by_symbol={"BTCUSDT": self._btc_bars()})
+
+        assert regime is not None
+        engine.connect.assert_not_called()
+
+    def test_loads_btc_bars_when_not_in_bars_by_symbol(self):
+        cfg = ExperimentConfig(exp_id="exp008", regime_candidate="r1_sma200", symbols=["ETHUSDT"])
+
+        with patch("backtest.experiment._load_bars", return_value=self._btc_bars()) as mock_load:
+            regime = _resolve_regime(MagicMock(), cfg, bars_by_symbol={})
+
+        mock_load.assert_called_once()
+        assert mock_load.call_args[0][1] == "BTCUSDT"
+        assert regime is not None
 
 
 class TestResolvePreCache:

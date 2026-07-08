@@ -776,6 +776,96 @@ class TestSignalAggregator:
 
 
 # ===========================================================================
+# 7a2. Aggregator — Phase 12 regime gate (parameterized, not yet enabled
+# by default; mirrors ReplayAggregator's gate exactly)
+# ===========================================================================
+
+class TestSignalAggregatorRegimeGate:
+
+    def _agg(self, regime=None, as_of=None):
+        from signals.aggregator import SignalAggregator
+        from signals.sentiment import NeutralSentimentSignalGenerator
+
+        agg = SignalAggregator.__new__(SignalAggregator)
+        agg.weights   = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
+        agg.buy_gate  = 0.15
+        agg.sell_gate = -0.15
+        agg.technical = MagicMock()
+        agg.ml        = MagicMock()
+        agg.sentiment = MagicMock()
+        agg._neutral_sentiment = NeutralSentimentSignalGenerator()
+        agg._regime = regime
+        agg.technical.generate_signal.return_value = _signal(SignalDirection.BUY, 0.8, "technical")
+        agg.ml.generate_signal.return_value        = _signal(SignalDirection.BUY, 0.8, "ml")
+        agg.sentiment.generate_signal.return_value = _signal(SignalDirection.HOLD, 0.4, "sentiment")
+        return agg
+
+    def test_risk_off_blocks_a_buy(self):
+        from signals.regime import RegimeState
+
+        as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        agg = self._agg(regime={as_of.date(): RegimeState.RISK_OFF})
+
+        result = agg.aggregate("BTCUSDT", as_of=as_of)
+
+        assert result.direction == SignalDirection.HOLD
+
+    def test_risk_on_allows_a_buy(self):
+        from signals.regime import RegimeState
+
+        as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        agg = self._agg(regime={as_of.date(): RegimeState.RISK_ON})
+
+        result = agg.aggregate("BTCUSDT", as_of=as_of)
+
+        assert result.direction == SignalDirection.BUY
+
+    def test_no_regime_configured_is_unaffected_default_behavior(self):
+        agg = self._agg(regime=None)
+
+        result = agg.aggregate("BTCUSDT")
+
+        assert result.direction == SignalDirection.BUY
+
+    def test_never_blocks_a_sell(self):
+        from signals.regime import RegimeState
+
+        as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        agg = self._agg(regime={as_of.date(): RegimeState.RISK_OFF})
+        agg.technical.generate_signal.return_value = _signal(SignalDirection.SELL, 0.8, "technical")
+        agg.ml.generate_signal.return_value = _signal(SignalDirection.SELL, 0.8, "ml")
+
+        result = agg.aggregate("BTCUSDT", as_of=as_of)
+
+        assert result.direction == SignalDirection.SELL
+
+    def test_construction_without_init_still_works_regime_defaults_none(self):
+        """Existing __new__-based test helpers elsewhere in this file don't
+        set _regime at all — aggregate() must not crash on a missing
+        attribute, matching engine.py's getattr(..., None) pattern for the
+        same class of optional, Phase-12-and-later attribute."""
+        from signals.aggregator import SignalAggregator
+        from signals.sentiment import NeutralSentimentSignalGenerator
+
+        agg = SignalAggregator.__new__(SignalAggregator)
+        agg.weights   = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
+        agg.buy_gate  = 0.15
+        agg.sell_gate = -0.15
+        agg.technical = MagicMock()
+        agg.ml        = MagicMock()
+        agg.sentiment = MagicMock()
+        agg._neutral_sentiment = NeutralSentimentSignalGenerator()
+        agg.technical.generate_signal.return_value = _signal(SignalDirection.BUY, 0.8, "technical")
+        agg.ml.generate_signal.return_value        = _signal(SignalDirection.BUY, 0.8, "ml")
+        agg.sentiment.generate_signal.return_value = _signal(SignalDirection.HOLD, 0.4, "sentiment")
+        # deliberately NOT setting agg._regime
+
+        result = agg.aggregate("BTCUSDT")
+
+        assert result.direction == SignalDirection.BUY
+
+
+# ===========================================================================
 # 7b. Aggregator — as_of threading + neutral sentiment swap-in
 # ===========================================================================
 

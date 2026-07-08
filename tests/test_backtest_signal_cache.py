@@ -149,6 +149,80 @@ class TestReplayAggregatorFusion:
         assert guarded_agg.aggregate("BTCUSDT", as_of=_START).direction == SignalDirection.HOLD
 
 
+class TestReplayAggregatorRegimeGate:
+    """Phase 12: an optional post-fusion regime gate — blocks BUY only,
+    never SELL/HOLD, and is fully backward compatible (regime=None is the
+    existing no-gate behavior)."""
+
+    def _row_df(self, **rule_values):
+        neutral = {
+            "rsi_14_proxy": 50.0, "macd_line": 0.0, "bb_zscore": 0.0,
+            "pct_change_1h": 0.0, "pct_change_24h": 0.0, "close_vs_sma50": 0.0,
+        }
+        neutral.update(rule_values)
+        df = _feature_df(1)
+        for col, val in neutral.items():
+            df[col] = val
+        return df
+
+    def _buy_signal_df(self):
+        # tech BUY(0.8)*0.4 = 0.32 > 0.15 -> BUY, matches test_strong_technical_buy_alone
+        return self._row_df(rsi_14_proxy=25.0, macd_line=0.5, pct_change_1h=0.5)
+
+    def test_risk_off_blocks_a_buy(self):
+        from signals.regime import RegimeState
+
+        df = self._buy_signal_df()
+        regime = {_START.date(): RegimeState.RISK_OFF}
+        agg = ReplayAggregator(df, prob_map={}, regime=regime)
+
+        result = agg.aggregate("BTCUSDT", as_of=_START)
+
+        assert result.direction == SignalDirection.HOLD
+
+    def test_risk_on_allows_a_buy(self):
+        from signals.regime import RegimeState
+
+        df = self._buy_signal_df()
+        regime = {_START.date(): RegimeState.RISK_ON}
+        agg = ReplayAggregator(df, prob_map={}, regime=regime)
+
+        result = agg.aggregate("BTCUSDT", as_of=_START)
+
+        assert result.direction == SignalDirection.BUY
+
+    def test_no_regime_dict_is_unaffected_default_behavior(self):
+        df = self._buy_signal_df()
+        agg = ReplayAggregator(df, prob_map={})  # regime not passed
+
+        result = agg.aggregate("BTCUSDT", as_of=_START)
+
+        assert result.direction == SignalDirection.BUY
+
+    def test_missing_date_in_regime_dict_defaults_to_allowing_buy(self):
+        from signals.regime import RegimeState
+
+        df = self._buy_signal_df()
+        regime = {}  # no entry for this date at all
+        agg = ReplayAggregator(df, prob_map={}, regime=regime)
+
+        result = agg.aggregate("BTCUSDT", as_of=_START)
+
+        assert result.direction == SignalDirection.BUY
+
+    def test_never_blocks_a_sell(self):
+        from signals.regime import RegimeState
+
+        # tech SELL(0.55)*0.4 = -0.22 < -0.15 -> SELL, matches test_moderate_technical_sell_alone
+        df = self._row_df(rsi_14_proxy=65.0, pct_change_1h=-0.5)
+        regime = {_START.date(): RegimeState.RISK_OFF}
+        agg = ReplayAggregator(df, prob_map={}, regime=regime)
+
+        result = agg.aggregate("BTCUSDT", as_of=_START)
+
+        assert result.direction == SignalDirection.SELL
+
+
 class TestPrecomputeWalkForwardProbs:
 
     def test_schedule_and_warmup(self):

@@ -187,9 +187,18 @@ class ReplayAggregator:
     tests/test_backtest_signal_cache.py.
     """
 
-    def __init__(self, feature_df, prob_map: dict, params: FusionParams | None = None):
+    def __init__(
+        self, feature_df, prob_map: dict, params: FusionParams | None = None,
+        regime: dict | None = None,
+    ):
         self.params = params or FusionParams()
         self._probs = prob_map
+        # Phase 12: optional daily BTC regime gate (dict[date, RegimeState]
+        # from signals.regime) — a post-fusion overlay, not a FusionParams
+        # field, since it's computed once and shared across every
+        # fusion-knob sweep rather than varying per sweep point. None (the
+        # default) is the pre-Phase-12 no-gate behavior, unchanged.
+        self._regime = regime
         self._ts_index: dict[str, list] = {}
         self._rows: dict[str, list[dict]] = {}
         if feature_df is not None and len(feature_df):
@@ -241,6 +250,13 @@ class ReplayAggregator:
             direction = SignalDirection.SELL
         else:
             direction = SignalDirection.HOLD
+
+        # Regime gate: blocks new BUYs in a RISK_OFF macro regime; never
+        # blocks SELL (exits must always work) or an already-HOLD signal.
+        if direction == SignalDirection.BUY and self._regime is not None:
+            from signals.regime import RegimeState
+            if self._regime.get(as_of.date()) == RegimeState.RISK_OFF:
+                direction = SignalDirection.HOLD
 
         return AggregatedSignal(
             direction=direction,

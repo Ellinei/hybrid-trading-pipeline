@@ -47,6 +47,16 @@ from signals.ml_model import MLSignalGenerator
 
 @dataclass
 class ExperimentConfig:
+    """The validated strategy's tunable knobs, one place — this is the
+    Phase 12 "StrategyConfig" pulled forward for the replay path (the
+    plan's original suggestion was a standalone config/strategy.py; this
+    extends the dataclass that already served this role for `cli
+    experiment` rather than introducing a second, near-duplicate one).
+    Phase 13 gives execution/bot_runner.py an equivalent live-side
+    config; that unification is deliberately not attempted here since
+    live has operational fields (retraining schedule, model paths) this
+    shape has no business holding yet.
+    """
     exp_id: str
     symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     buy_gate: float = 0.15
@@ -60,6 +70,9 @@ class ExperimentConfig:
     walk_forward_months: int = 1
     train_window_days: int = 540
     output_dir: str = "results"
+    regime_candidate: str | None = None
+    """Key into signals.regime.REGIME_FUNCTIONS (e.g. "r1_sma200"), or
+    None to disable the Phase 12 regime gate entirely."""
 
 
 def _git_sha() -> str:
@@ -131,8 +144,8 @@ def resolve_prob_cache(
     return prob_map, feature_df, cache_path
 
 
-def _compute_metrics(result) -> dict:
-    return {
+def _compute_metrics(result, regime: dict | None = None) -> dict:
+    metrics = {
         "trade_count": result.metrics["trade_count"],
         "win_rate": result.metrics["win_rate"],
         "profit_factor": result.metrics["profit_factor"],
@@ -145,6 +158,32 @@ def _compute_metrics(result) -> dict:
         "per_symbol": per_symbol_metrics(result.trades),
         "max_single_trade_profit_share": max_single_trade_profit_share(result.trades),
     }
+    if regime is not None:
+        from signals.regime import days_blocked_pct
+        # The Phase 12 pre-registration's explicit diagnostic: catches an
+        # exp005-style over-blocking filter (~80% days blocked) before it
+        # reaches the acceptance gate.
+        metrics["regime_days_blocked_pct"] = days_blocked_pct(regime)
+    return metrics
+
+
+def _resolve_regime(engine, cfg: ExperimentConfig, bars_by_symbol: dict) -> dict | None:
+    """Compute the Phase 12 regime dict for cfg.regime_candidate, or None
+    if no candidate is configured. Always derived from BTCUSDT — the
+    macro regime signal — regardless of whether BTCUSDT is itself one of
+    the traded symbols in this run."""
+    if cfg.regime_candidate is None:
+        return None
+    from signals.regime import REGIME_FUNCTIONS, resample_daily_close
+
+    if cfg.regime_candidate not in REGIME_FUNCTIONS:
+        raise ValueError(
+            f"Unknown regime candidate: {cfg.regime_candidate!r}. "
+            f"Choices: {sorted(REGIME_FUNCTIONS)}"
+        )
+    btc_bars = bars_by_symbol.get("BTCUSDT") or _load_bars(engine, "BTCUSDT", None, None)
+    daily_close = resample_daily_close(btc_bars)
+    return REGIME_FUNCTIONS[cfg.regime_candidate](daily_close)
 
 
 def _build_ledger_row(cfg: ExperimentConfig, metrics: dict, git_sha: str, data_range: str) -> str:
@@ -173,7 +212,7 @@ def _data_range(equity_curve) -> str:
     return f"{start}..{end}"
 
 
-def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str) -> str:
+def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str, regime: dict | None = None) -> str:
     out_dir = os.path.join(cfg.output_dir, cfg.exp_id)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -188,7 +227,7 @@ def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str) -> str:
         writer.writerow(["timestamp", "equity"])
         writer.writerows(result.equity_curve)
 
-    metrics = _compute_metrics(result)
+    metrics = _compute_metrics(result, regime)
     with open(os.path.join(out_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2, default=str)
 
@@ -226,6 +265,7 @@ def run_experiment(engine, cfg: ExperimentConfig) -> dict:
             filters_by_symbol[symbol] = None
 
     prob_map, feature_df, cache_path = resolve_prob_cache(engine, cfg, bars_by_symbol)
+    regime = _resolve_regime(engine, cfg, bars_by_symbol)
 
     fusion = FusionParams(
         buy_gate=cfg.buy_gate,
@@ -235,7 +275,7 @@ def run_experiment(engine, cfg: ExperimentConfig) -> dict:
         require_uptrend_for_buys=cfg.require_uptrend,
         guard_bb_dip_buy=cfg.bb_guard,
     )
-    aggregator = ReplayAggregator(feature_df, prob_map, fusion)
+    aggregator = ReplayAggregator(feature_df, prob_map, fusion, regime=regime)
 
     backtest_config = BacktestConfig(
         symbols=cfg.symbols,
@@ -252,7 +292,7 @@ def run_experiment(engine, cfg: ExperimentConfig) -> dict:
         walk_forward_months=0,
     )
 
-    out_dir = _write_artifacts(cfg, result, cache_path)
-    metrics = _compute_metrics(result)
+    out_dir = _write_artifacts(cfg, result, cache_path, regime)
+    metrics = _compute_metrics(result, regime)
     metrics["_output_dir"] = out_dir
     return metrics
