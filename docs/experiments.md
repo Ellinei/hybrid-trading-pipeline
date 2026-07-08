@@ -6,12 +6,60 @@ Canonical run (the only numbers that count):
 python -m backtest.run_backtest --walk-forward 1 --min-train-days 60 [--start/--end] --output results/trades_<exp_id>.csv
 ```
 
+As of Phase 11, `python -m cli experiment --id <exp_id> [strategy flags]` is the
+preferred way to run this — auto-resolves/builds the prob cache and writes
+`results/<exp_id>/{trades.csv, equity_curve.csv, metrics.json, config.json,
+report.html, ledger_row.md}` in one command; `ledger_row.md` is a ready-to-paste
+draft for this table, never auto-appended (the verdict/notes columns need a human).
+
 Acceptance rules:
 - Quoted results need >=30 OOS trades (target >=100 on multi-year data).
 - "Improvement" = PF >= +0.05 vs current baseline AND no single trade >40% of gross profit.
 - Final 6 months of data = holdout — excluded from all tuning via `--end`, spent once at the final gate.
 - Winners must pass leave-one-symbol-out: PF > 1.0 on >=2 of 3 symbols.
 - Win rate, exit-reason mix, hold-time stats are diagnostics, never optimization targets.
+
+## Phase 12 pre-registration (2026-07-08, before any regime code exists)
+
+exp007's holdout failure (Jan-2026, PF 0.25) was a correlated BTC/ETH/SOL
+downtrend — the ledger's own conclusion was "Phase 11 should add macro regime
+filter." A per-symbol trend filter was already tried and rejected (exp005:
+`--require-uptrend` on hourly `close_vs_sma50` blocked 28/35 windows, only 15
+trades). This section commits to a candidate set and acceptance criteria
+**before** `signals/regime.py` exists or any variant has been run, specifically
+to prevent picking a filter because it happens to fix Jan-2026 in hindsight —
+that would be fitting the regression check, not building a real regime signal.
+
+**Candidates** (daily BTC-level, not per-symbol/hourly — that's the exact
+mechanism exp005 falsified). Test **in this order, stop at the first that
+passes the acceptance gate**; do not add a 5th variant after seeing R1–R4's
+results:
+- **R1** — BTC close vs 200-day SMA (classic trend gate).
+- **R2** — BTC 50d/200d SMA cross with ±2% hysteresis band (prevents flapping
+  at the crossover).
+- **R3** — BTC 30-day realized-volatility percentile, risk-off above p80.
+- **R4** — R1 trend AND R3 vol composite.
+
+Mechanism: binary entry gate only (blocks BUY, never SELL — exits always work)
+applied as a post-fusion overlay on the existing cached probs, so no prob cache
+needs rebuilding to sweep variants. No position-size scaling by regime in v1.
+
+**Acceptance gate — pre-holdout data only (through 2025-12-31)**:
+- PF >= ~1.45 (a small tolerated decrease from exp007's pre-holdout 1.53 is
+  acceptable; a large one is not).
+- >=100 OOS trades.
+- Per-symbol PF > 1.0 on >=2 of 3 symbols.
+- Days-blocked < 40% (exp005's failure mode was ~80% blocked; this is the
+  explicit diagnostic that catches a repeat).
+- Worst single walk-forward window improved vs exp007's pre-holdout worst window.
+
+**Jan-2026 holdout is a regression check, not validation** — it was already
+spent once (exp007) and the regime hypothesis was derived from its failure, so
+re-passing it would be circular. Threshold: holdout PF >= 0.8 OR gross loss cut
+>= 60% vs exp007's holdout. A regime variant that clears the pre-holdout gate
+but fails this check is not rejected outright — it's flagged as pre-holdout-only
+evidence pending real forward validation (fresh backfilled months + paper
+trading), not sent back for retuning against Jan-2026.
 
 | exp_id | date | git SHA | config delta | data range | OOS trades | PF | expectancy | win rate | max DD | Sharpe | % windows PF>1 | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
