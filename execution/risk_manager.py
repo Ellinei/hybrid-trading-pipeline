@@ -27,6 +27,7 @@ class RiskConfig:
     max_drawdown_pct:      float = 0.10   # 10 % circuit-breaker
     min_confidence:        float = 0.55
     max_hold_bars:         int   = 0      # close after N hourly bars (0 = disabled)
+    max_portfolio_risk_pct: float | None = None  # cap on sum(entry-stop)*qty across open positions; None = disabled
 
 
 class RiskManager:
@@ -41,6 +42,39 @@ class RiskManager:
         self.client = client
         self.engine = db_engine
         self.config = config or RiskConfig()
+        self._ensure_bot_state_table()
+
+    # ------------------------------------------------------------------
+    # raw.bot_state — small key/value table for state that must survive
+    # process restarts (currently just the drawdown baseline/peak).
+    # ------------------------------------------------------------------
+
+    def _ensure_bot_state_table(self) -> None:
+        with self.engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS raw.bot_state (
+                    key        VARCHAR(50) PRIMARY KEY,
+                    value      NUMERIC,
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
+            conn.commit()
+
+    def _get_bot_state(self, key: str) -> float | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT value FROM raw.bot_state WHERE key = :key"), {"key": key}
+            ).fetchone()
+        return float(row._mapping["value"]) if row else None
+
+    def _set_bot_state(self, key: str, value: float) -> None:
+        with self.engine.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO raw.bot_state (key, value, updated_at)
+                VALUES (:key, :value, now())
+                ON CONFLICT (key) DO UPDATE SET value = :value, updated_at = now()
+            """), {"key": key, "value": value})
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Account state
@@ -82,6 +116,23 @@ class RiskManager:
         except Exception as exc:
             log.warning("open_position_count_failed", error=str(exc))
             return 0
+
+    def get_open_position_risk(self) -> float:
+        """Sum of (entry_price - stop_loss) * quantity across open BUY
+        positions — dollar exposure already committed if every stop-loss
+        fires. Feeds the portfolio concentration cap in approve_trade."""
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    text(
+                        "SELECT COALESCE(SUM((entry_price - stop_loss) * quantity), 0)"
+                        " FROM raw.trades WHERE status = 'open' AND direction = 'BUY'"
+                    )
+                )
+                return float(result.scalar() or 0)
+        except Exception as exc:
+            log.warning("open_position_risk_lookup_failed", error=str(exc))
+            return 0.0
 
     def get_atr(self, symbol: str) -> float:
         """Latest range_14 from features.feat_technical; 0.0 if not found."""
@@ -141,10 +192,15 @@ class RiskManager:
         return stop_loss, take_profit
 
     def check_drawdown(self) -> tuple[float, bool]:
-        """Return (drawdown_pct, is_breached) based on realised P&L.
-
-        Uses _INITIAL_BALANCE as the denominator so a fresh account
-        doesn't divide by zero.
+        """Return (drawdown_pct, is_breached) — peak-tracked realized
+        equity (raw.bot_state's persisted baseline + cumulative closed
+        pnl), not a fixed floor. The old formula (abs(total_pnl) /
+        _INITIAL_BALANCE, 0 whenever total_pnl was positive) never
+        detected a pullback after a gain — a run that peaked at +$2000
+        then dropped to +$1500 read as 0% drawdown instead of the real
+        ~4% pullback from its peak. Baseline defaults to _INITIAL_BALANCE
+        on first use and is only mutable via reset_drawdown_baseline
+        (an explicit, human-initiated action after reviewing a breach).
         """
         try:
             with self.engine.connect() as conn:
@@ -155,11 +211,37 @@ class RiskManager:
                     )
                 )
                 total_pnl = float(result.scalar() or 0)
+
+            baseline = self._get_bot_state("drawdown_baseline")
+            if baseline is None:
+                baseline = _INITIAL_BALANCE
+                self._set_bot_state("drawdown_baseline", baseline)
+
+            current_equity = baseline + total_pnl
+
+            peak = self._get_bot_state("drawdown_peak")
+            if peak is None or current_equity > peak:
+                peak = current_equity
+                self._set_bot_state("drawdown_peak", peak)
         except Exception:
             return 0.0, False
 
-        drawdown = abs(total_pnl) / _INITIAL_BALANCE if total_pnl < 0 else 0.0
+        drawdown = (peak - current_equity) / peak if peak > 0 else 0.0
         return drawdown, drawdown >= self.config.max_drawdown_pct
+
+    def reset_drawdown_baseline(self, new_baseline: float | None = None) -> None:
+        """Explicit, human-initiated reset — re-anchors both the baseline
+        and peak to *new_baseline* (default: current live account
+        balance). Use after reviewing a tripped circuit breaker; nothing
+        else in this class calls this automatically."""
+        if new_baseline is None:
+            new_baseline = self.get_account_balance()
+            if new_baseline is None:
+                raise RuntimeError(
+                    "cannot reset drawdown baseline: account balance unavailable"
+                )
+        self._set_bot_state("drawdown_baseline", new_baseline)
+        self._set_bot_state("drawdown_peak", new_baseline)
 
     # ------------------------------------------------------------------
     # Gate
@@ -206,5 +288,17 @@ class RiskManager:
         size = self.calculate_position_size(price, atr, balance)
         if size <= 0:
             return False, "position size < $10 notional — trade too small"
+
+        if self.config.max_portfolio_risk_pct is not None:
+            stop_loss, _ = self.calculate_stops(price, atr)
+            new_risk = (price - stop_loss) * size
+            existing_risk = self.get_open_position_risk()
+            max_risk = balance * self.config.max_portfolio_risk_pct
+            if existing_risk + new_risk > max_risk:
+                return False, (
+                    f"portfolio risk cap exceeded: existing ${existing_risk:.2f} + "
+                    f"new ${new_risk:.2f} > {self.config.max_portfolio_risk_pct:.0%} "
+                    f"of balance (${max_risk:.2f})"
+                )
 
         return True, "approved"

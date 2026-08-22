@@ -49,6 +49,7 @@ class SignalAggregator:
         technical: TechnicalSignalGenerator | None = None,
         ml: MLSignalGenerator | None = None,
         regime: dict | None = None,
+        sentiment_enabled: bool = True,
     ) -> None:
         """*buy_gate*/*sell_gate* are the fused-score direction thresholds.
         The sell gate is the strategy's de facto exit threshold: SELL
@@ -63,7 +64,14 @@ class SignalAggregator:
         when RISK_OFF. Mirrors ReplayAggregator's identical gate so
         backtest and live share the same semantics. None (the default)
         is a no-op — not yet enabled by default; Phase 13 wires it on via
-        StrategyConfig."""
+        StrategyConfig.
+
+        *sentiment_enabled* (default True) — when False, live cycles
+        (as_of=None) use the neutral sentiment generator too, matching
+        the validated backtest's sentiment=neutral assumption (backtests
+        already force neutral via as_of; live had no equivalent switch
+        and always hit real VADER, which is the Phase 13 parity gap this
+        closes)."""
         self.weights   = weights or DEFAULT_WEIGHTS
         self.buy_gate  = buy_gate
         self.sell_gate = sell_gate
@@ -72,6 +80,7 @@ class SignalAggregator:
         self.sentiment = SentimentSignalGenerator()
         self._neutral_sentiment = NeutralSentimentSignalGenerator()
         self._regime = regime
+        self.sentiment_enabled = sentiment_enabled
 
     # ------------------------------------------------------------------
     # Core fusion
@@ -83,8 +92,15 @@ class SignalAggregator:
 
         # Live sentiment has no historical archive — when replaying a past
         # bar (as_of set), swap in the no-op neutral generator instead of
-        # hitting live RSS feeds for "current" sentiment.
-        sentiment_gen = self._neutral_sentiment if as_of is not None else self.sentiment
+        # hitting live RSS feeds for "current" sentiment. sentiment_enabled
+        # is the live-mode equivalent switch (getattr: __new__-based test
+        # helpers and pre-Phase-13 callers don't set it — default True
+        # preserves prior behavior).
+        sentiment_gen = (
+            self._neutral_sentiment
+            if as_of is not None or not getattr(self, "sentiment_enabled", True)
+            else self.sentiment
+        )
 
         for name, gen in (
             ("technical", self.technical),

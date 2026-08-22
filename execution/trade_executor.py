@@ -13,6 +13,7 @@ OCO first so the manual sell isn't blocked by locked balance.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import text
@@ -51,8 +52,15 @@ _SELECT_OPEN_TRADE = text("""
     ORDER BY executed_at DESC LIMIT 1
 """)
 
+_SELECT_EXPIRED_OPEN_TRADES = text("""
+    SELECT id, symbol, quantity, entry_price, oco_order_list_id, executed_at
+    FROM raw.trades
+    WHERE status = 'open' AND direction = 'BUY' AND executed_at <= :cutoff
+""")
+
 _UPDATE_CLOSED_TRADE = text("""
-    UPDATE raw.trades SET status = :status, closed_at = now(), pnl = :pnl
+    UPDATE raw.trades
+    SET status = :status, closed_at = now(), pnl = :pnl, close_reason = :close_reason
     WHERE id = :id
 """)
 
@@ -107,6 +115,10 @@ class TradeExecutor:
             conn.execute(text(
                 "ALTER TABLE raw.trades "
                 "ADD COLUMN IF NOT EXISTS oco_order_list_id BIGINT"
+            ))
+            conn.execute(text(
+                "ALTER TABLE raw.trades "
+                "ADD COLUMN IF NOT EXISTS close_reason VARCHAR(20)"
             ))
             conn.commit()
 
@@ -188,15 +200,18 @@ class TradeExecutor:
             row = conn.execute(_SELECT_OPEN_TRADE, {"symbol": symbol}).fetchone()
         return dict(row._mapping) if row else None
 
-    def _close_trade(self, trade_id, entry_price, exit_price, qty, status) -> dict:
+    def _close_trade(self, trade_id, entry_price, exit_price, qty, status,
+                      close_reason: str | None = None) -> dict:
         pnl = (exit_price - entry_price) * qty
         with self.engine.connect() as conn:
             conn.execute(_UPDATE_CLOSED_TRADE,
-                         {"status": status, "pnl": pnl, "id": trade_id})
+                         {"status": status, "pnl": pnl, "id": trade_id,
+                          "close_reason": close_reason})
             conn.commit()
         log.info("trade_closed", id=trade_id, exit_price=round(exit_price, 2),
-                  pnl=round(pnl, 2), status=status)
-        return {"id": trade_id, "status": status, "pnl": pnl, "exit_price": exit_price}
+                  pnl=round(pnl, 2), status=status, close_reason=close_reason)
+        return {"id": trade_id, "status": status, "pnl": pnl, "exit_price": exit_price,
+                "close_reason": close_reason}
 
     # ------------------------------------------------------------------
     # Execution
@@ -319,18 +334,33 @@ class TradeExecutor:
         if open_trade is None:
             log.error("sell_close_no_open_trade", symbol=signal.symbol)
             return None
+        return self._close_open_trade(signal.symbol, open_trade, price, dry_run,
+                                       close_reason="signal_close")
 
+    def _close_open_trade(
+        self, symbol: str, open_trade: dict, price: float, dry_run: bool,
+        close_reason: str,
+    ) -> dict | None:
+        """Cancel any resting OCO then market-close *open_trade* at *price*,
+        closing the ACTUAL recorded quantity — never a freshly computed
+        size. Shared by _execute_sell_close (signal-driven) and
+        close_expired_positions (time-stop): an OCO that already filled
+        externally is recorded as closed_externally with no close_reason
+        (which leg fired isn't knowable without an extra order-status
+        call), not double-sold.
+        """
         qty           = float(open_trade["quantity"])
         entry_price   = float(open_trade["entry_price"])
         order_list_id = open_trade["oco_order_list_id"]
 
         if dry_run:
-            log.info("DRY_RUN_CLOSE", symbol=signal.symbol, quantity=qty,
-                      exit_price=round(price, 2))
-            return self._close_trade(open_trade["id"], entry_price, price, qty, "dry_run")
+            log.info("DRY_RUN_CLOSE", symbol=symbol, quantity=qty,
+                      exit_price=round(price, 2), close_reason=close_reason)
+            return self._close_trade(open_trade["id"], entry_price, price, qty,
+                                      "dry_run", close_reason=close_reason)
 
         if not self.live_orders_enabled:
-            log.warning("live_orders_disabled", symbol=signal.symbol)
+            log.warning("live_orders_disabled", symbol=symbol)
             return None
 
         if order_list_id is not None:
@@ -339,22 +369,55 @@ class TradeExecutor:
                 # cancel endpoint (DELETE /api/v3/orderList) is exposed as
                 # the generic v3_delete_order_list.
                 self.client.client.v3_delete_order_list(
-                    symbol=signal.symbol, orderListId=order_list_id
+                    symbol=symbol, orderListId=order_list_id
                 )
             except Exception as exc:
                 log.warning("oco_cancel_failed_assuming_already_closed",
-                            symbol=signal.symbol, order_list_id=order_list_id,
+                            symbol=symbol, order_list_id=order_list_id,
                             error=str(exc))
                 return self._close_trade(open_trade["id"], entry_price, price, qty,
-                                          "closed_externally")
+                                          "closed_externally", close_reason=None)
 
         try:
             sell_resp = self.client.client.order_market_sell(
-                symbol=signal.symbol, quantity=qty, newOrderRespType="FULL",
+                symbol=symbol, quantity=qty, newOrderRespType="FULL",
             )
         except Exception as exc:
-            log.error("sell_close_order_failed", symbol=signal.symbol, error=str(exc))
+            log.error("sell_close_order_failed", symbol=symbol, error=str(exc))
             return None
 
         _, avg_exit_price = self._parse_fill(sell_resp, qty, price)
-        return self._close_trade(open_trade["id"], entry_price, avg_exit_price, qty, "closed")
+        return self._close_trade(open_trade["id"], entry_price, avg_exit_price, qty,
+                                  "closed", close_reason=close_reason)
+
+    def close_expired_positions(
+        self, max_hold_bars: int, dry_run: bool = False
+    ) -> list[dict]:
+        """Force-close open BUY positions held longer than *max_hold_bars*
+        hours — the live counterpart to backtest.engine's time-stop
+        (engine.py: "the ML edge is defined over LABEL_HORIZON_BARS;
+        holding past max_hold_bars is unmodeled exposure"). No-op
+        (doesn't touch the DB) when max_hold_bars <= 0 — the disabled
+        default. Call at the top of each bot_runner cycle, before
+        generating new entry signals.
+        """
+        if max_hold_bars <= 0:
+            return []
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_hold_bars)
+        with self.engine.connect() as conn:
+            rows = conn.execute(_SELECT_EXPIRED_OPEN_TRADES, {"cutoff": cutoff}).fetchall()
+
+        closed = []
+        for row in rows:
+            trade = dict(row._mapping)
+            try:
+                price = self.client.get_current_price(trade["symbol"])
+            except Exception as exc:
+                log.error("price_fetch_failed", symbol=trade["symbol"], error=str(exc))
+                continue
+            result = self._close_open_trade(trade["symbol"], trade, price, dry_run,
+                                             close_reason="time_stop")
+            if result is not None:
+                closed.append(result)
+        return closed

@@ -4,10 +4,24 @@ Phase 11a speeds up walk-forward retraining (frozen hyperparameters,
 n_jobs fixes, eventually parallel windows and a default cache/replay run
 mode). None of that code runs during a --load-cache replay — the prob
 cache already holds every ML prediction, so replay is pure in-memory
-fusion + bar simulation. This test is the tripwire: every Phase 11a change
-must still reproduce the exp007 trade log byte-for-byte when replayed from
-the existing cache/wf_540d_h8.pkl. If it doesn't, a "performance" change
-silently altered strategy behavior.
+fusion + bar simulation. This test is the tripwire: every Phase 11a-style
+performance-only change must still reproduce the exp007 trade log
+byte-for-byte when replayed from the existing cache/wf_540d_h8.pkl. If it
+doesn't, a "performance" change silently altered strategy behavior.
+
+Re-baselined once, in Phase 13: fixing RiskManager/SimulatedRiskManager.
+check_drawdown's peak-tracking bug (old formula: abs(realized_pnl) vs a
+fixed floor, read 0% drawdown any time cumulative pnl was still net
+positive — never detected a pullback after a gain) correctly makes the
+circuit breaker trip 3 trades earlier in this specific replay. Verified
+before re-baselining: those 3 trades are the late-Feb-2026 SOL entries
+inside the already-known holdout downtrend (net -$29.73) — the breaker
+catching a real >10% drawdown exp007's own ledger row already reported
+(10.38%) but the old formula never acted on. exp008 (the adopted
+strategy) was independently re-run end-to-end and its trades.csv came
+back byte-identical — its true drawdown never approached 10%, so the fix
+has zero effect there. This is the one intentional exception; any other
+divergence from here forward is a real regression.
 
 Requires a live TimescaleDB with the same OHLCV/feature data the golden
 baseline was captured against, and the existing prob cache — skips

@@ -916,6 +916,72 @@ class TestAggregatorAsOf:
 
 
 # ===========================================================================
+# 7c. Aggregator — Phase 13 sentiment_enabled flag (live parity: backtests
+# neutralize sentiment via as_of; live must be able to as well, since it
+# never sets as_of).
+# ===========================================================================
+
+class TestSignalAggregatorSentimentEnabled:
+
+    def _agg(self, sentiment_enabled=None):
+        from signals.aggregator import SignalAggregator
+        from signals.sentiment import NeutralSentimentSignalGenerator
+
+        agg = SignalAggregator.__new__(SignalAggregator)
+        agg.weights   = {"technical": 0.40, "ml": 0.40, "sentiment": 0.20}
+        agg.buy_gate  = 0.15
+        agg.sell_gate = -0.15
+        agg.technical = MagicMock()
+        agg.ml        = MagicMock()
+        agg.sentiment = MagicMock()
+        agg._neutral_sentiment = NeutralSentimentSignalGenerator()
+        if sentiment_enabled is not None:
+            agg.sentiment_enabled = sentiment_enabled
+        agg.technical.generate_signal.return_value = _signal(SignalDirection.BUY, 0.8, "technical")
+        agg.ml.generate_signal.return_value        = _signal(SignalDirection.BUY, 0.8, "ml")
+        agg.sentiment.generate_signal.return_value = _signal(SignalDirection.HOLD, 0.4, "sentiment")
+        return agg
+
+    def test_sentiment_enabled_false_forces_neutral_in_live_mode(self):
+        """as_of=None (live mode) would normally use the real sentiment
+        generator; sentiment_enabled=False must override that."""
+        agg = self._agg(sentiment_enabled=False)
+
+        agg.aggregate("BTCUSDT")
+
+        agg.sentiment.generate_signal.assert_not_called()
+
+    def test_sentiment_enabled_true_uses_real_sentiment_in_live_mode(self):
+        agg = self._agg(sentiment_enabled=True)
+
+        agg.aggregate("BTCUSDT")
+
+        agg.sentiment.generate_signal.assert_called_once_with("BTCUSDT")
+
+    def test_sentiment_enabled_missing_attribute_defaults_to_enabled(self):
+        """Existing __new__-based test helpers elsewhere in this file don't
+        set sentiment_enabled — must default to today's live behavior
+        (real sentiment), matching the _regime getattr-default pattern."""
+        agg = self._agg(sentiment_enabled=None)
+
+        agg.aggregate("BTCUSDT")
+
+        agg.sentiment.generate_signal.assert_called_once_with("BTCUSDT")
+
+    def test_sentiment_enabled_false_does_not_affect_replay_mode(self):
+        """as_of set already forces neutral sentiment regardless — confirm
+        sentiment_enabled=False doesn't break that existing path."""
+        agg = self._agg(sentiment_enabled=False)
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        result = agg.aggregate("BTCUSDT", as_of=cutoff)
+
+        agg.sentiment.generate_signal.assert_not_called()
+        sentiment_sub_signal = next(s for s in result.signals if s.source == "sentiment")
+        assert sentiment_sub_signal.direction == SignalDirection.HOLD
+
+
+# ===========================================================================
 # 8.  Reasoning string contains all three source names
 # ===========================================================================
 
