@@ -117,7 +117,32 @@ Runtime checks for the baseline run:
   server `idle_in_transaction_session_timeout` would drop the lock; none is
   configured.
 
-## Status of results
+## 2026-09-25 — checkpoint and corrected baseline
+
+- Checkpoint commit `0add8fd` (60 files, local only, not pushed).
+  `backups/` and `results/` are still untracked. A secret scan was clean.
+- Docker started; only the `postgres` service was brought up (no bot,
+  scheduler or Airflow). The container was recreated; the named-volume data
+  is intact (26,405 candles per symbol, 2023-07-05 20:00 to
+  2026-07-10 00:00, zero hourly gaps).
+- **Golden replay:** first run failed only because the new `--load-cache`
+  refusal blocked the legacy fixture cache. The harness now passes
+  `--force` with a comment; the reference CSV is unchanged. Result:
+  **1 passed, byte-identical to the preserved exp007 trade log.**
+- **Corrected baseline** `exp008_corrected_20260925`, window
+  [2023-07-05, 2026-01-01), same knobs, no retuning: **75 trades, PF 1.89,
+  max DD 4.06%, Sharpe 1.40.** It **fails** the Phase 12 gate on trade
+  count (75 < 100). Days blocked is 40.7% (corrected definition) or 23.9%
+  (registration-time definition). Every runtime check passed. Log:
+  `results/exp008_corrected_20260925.run.log`. The ledger row is in
+  `docs/experiments.md`.
+- **Attribution:** rebuilding the probabilities per grid point reproduces
+  the preliminary run exactly with lr 0.1 and the corrected run exactly
+  with lr 0.05 (depth 3, 100 trees). The whole PF 1.18 → 1.89 change
+  comes from the frozen learning rate the (causal vs leaky) CV selected.
+  That is fragility evidence, not validation.
+
+## Status of results (as of 2026-09-24; superseded by the section above)
 
 `results/exp008_causal_20260923` (95 trades, PF 1.181) remains a
 **preliminary diagnostic**. It predates the sparse-label fix, the cache

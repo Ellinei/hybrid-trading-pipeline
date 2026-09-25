@@ -79,10 +79,15 @@ def test_exp007_cache_replay_matches_golden_baseline(tmp_path):
         pytest.skip("TimescaleDB not reachable — cannot load bars/ATR for replay")
 
     out_csv = tmp_path / "trades_replay.csv"
+    # --force: the cache is a frozen fixture, predating cache keys and
+    # algorithm versions, which --load-cache now refuses by default. This test
+    # checks replay (fusion + bar simulation) parity only. It makes no claim
+    # that the cached probabilities are causally valid.
     proc = subprocess.run(
         [
             sys.executable, "-m", "backtest.run_backtest",
             "--load-cache", str(CACHE_PATH),
+            "--force",
             "--ml-buy-threshold", "0.55",
             "--max-hold-bars", "24",
             "--output", str(out_csv),
