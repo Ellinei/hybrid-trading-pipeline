@@ -96,3 +96,49 @@ historical data as fresh forward evidence or optimize win rate as the target.
 At the end, publish an operational verdict separately from the performance
 verdict. A subsequent testnet execution milestone requires its own readiness
 decision; this protocol never authorizes mainnet orders.
+
+## Activation record — 2026-09-25
+
+**Scope: operational validation only.** The corrected historical baseline
+`exp008_corrected_20260925` fails the Phase 12 gate (75 < 100 trades), and
+its PF depends on one hyperparameter (see `docs/experiments.md`). Following
+prerequisite 2, this trial reports operational behaviour. Any performance
+figures it produces are inconclusive unless the minimum-sample rule is met,
+and must not be read as validation.
+
+- **Actual paper start:** first cycle `2026-09-25T12:37:51Z`. This is one day
+  after the registered interval opened. The missed day is not reconstructed.
+- **Source revision:** `8969efb` (clean tree, `source_dirty: false`).
+- **Account:** `results/forward_20260924.sqlite3` (new file, 10,000 USDT,
+  fee 0.001 per side, 5 bps slippage per side, defaults).
+- **Data at activation:** 28,264 hourly candles per symbol,
+  2023-07-05 20:00 to 2026-09-25 11:00 UTC, with zero gaps. Features were
+  published valid at 11:00 (generation `ebcce6ac-…`) by the
+  `ohlcv_feature_refresh` DAG run `scheduled__2026-09-25T11:05:00+00:00`. The
+  R1 regime is RISK_ON for 2026-09-25; the first classified date is
+  2024-01-22.
+- **Model:** trained with `cli train --as-of 2026-09-25T00:00:00Z
+  --train-window-days 540 --frozen-params results/forward_20260924/frozen_params.json`.
+  The frozen parameters are the corrected baseline's: lr 0.05, depth 3,
+  100 trees. The disk path fits on 31,059 rows (labels revealed by
+  2026-06-08 17:00) and evaluates on the last 7,773. The live model's
+  newest training label is therefore about 3.5 months older than the cutoff,
+  whereas walk-forward fits on everything available. This is a known parity
+  difference; it is not a leak.
+  - `xgboost_signal.pkl` sha256 `56eb6952ae2a037ba3d03dd4cb6b169a2a94a1d8e87e097fafe74f3dd8f28477`
+  - `scaler.pkl` sha256 `bcfb20661a3e5713428d43beeb3e0ce796a7cfe4200358e62cc7f957ef302f1c`
+  - Copies and metadata are in `results/forward_20260924/model/`. The
+    previous (July, no provenance) model is archived at
+    `backups/models_pre_forward_20260925/`.
+  - Holdout at a 0.5 threshold: precision 0.46, recall 0.009. The model
+    rarely signals "up", so zero-trade stretches are expected.
+- **Strategy (resolved):** buy/sell gate 0.15 / -0.15, ML 0.55 / 0.35,
+  max hold 24, R1 regime, sentiment off, 3 h candle and feature freshness.
+- **First cycle:** three SELL signals, each rejected for lack of a position;
+  0 errors. Required freshness sources are fresh; streaming is stale but
+  informational only.
+- **Runtime:** Docker `postgres` plus `airflow-scheduler` with the hourly
+  `ohlcv_feature_refresh` DAG unpaused. The bot runs as a detached host
+  process (see `results/forward_20260924/bot.pid`), logging to
+  `results/forward_20260924/bot.log`. The machine and Docker Desktop must
+  stay up for the 7-day observation. Report any downtime as heartbeat gaps.
