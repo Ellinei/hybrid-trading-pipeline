@@ -1,0 +1,11 @@
+# Phase 13 regime correction report — 2026-09-23
+
+Implemented `signals.regime.build_causal_regime(bars, candidate)` for live and replay use. It maps each UTC entry date to the prior complete UTC day's BTC classification. A complete day requires all 24 hourly candles with finite positive closes. Missing or invalid days reset the consecutive history requirement: 200 days for R1/R2/R4, 60 days for R3. Missing classifications leave the gate enabled but block BUY. `None` deliberately disables the gate.
+
+Live and replay aggregators now use the same `regime_decision` rule. Only BUY is gated; SELL and existing position exits remain active. The live signal includes regime state, source date, and blocking reason in a `regime` signal metadata record and readable reasoning; the runner records regime blocks in the existing decision journal. On refresh failure the runner marks the gate `refresh_failed`, blocks entries, and clears that marker after a successful refresh. Paper quotes use `BinanceClientWrapper(testnet=False)`, the public mainnet source used by ingested candles; live remains configured by environment.
+
+Regression coverage includes changing a future BTC close without changing an earlier intraday entry, UTC rollover, incomplete and missing BTC history, missing BTC with a fresh ETH signal, invalid classification, refresh failure and recovery, SELL/time-stop continuity, and paper/live quote source selection.
+
+Verification: focused regime, signal-cache, and runner tests: **67 passed**. `git diff --check` passed (Git emitted line-ending warnings). Full `tests` suite: **479 passed, 2 failed**. The golden parity subprocess attempted Binance testnet ping and failed with sandbox socket permission error (`WinError 10013`); the parent agent separately reported it passes with network permission. `TestBackfillFailure.test_empty_symbol_list_cannot_report_success` failed in ingestion code being edited concurrently by the ingestion agent. No database, model, or exchange operations were performed for this scope.
+
+Integration contract for `backtest/experiment.py`: call `build_causal_regime(btc_bars, cfg.regime_candidate)` when the candidate is enabled, retaining `None` only for explicit disablement. The map is keyed by entry date, so `ReplayAggregator` looks up `as_of.date()`.

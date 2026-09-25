@@ -11,6 +11,7 @@ Run:
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -95,6 +96,27 @@ class TestExperimentSubcommand:
             with pytest.raises(SystemExit):
                 main(["experiment"])
 
+    def test_utc_evaluation_window_reaches_config(self):
+        with patch("backtest.run_backtest.build_engine"), \
+             patch("backtest.experiment.run_experiment", return_value=self._fake_metrics()) as mock_run:
+            assert main(["experiment", "--id", "bounded", "--start", "2026-01-01T00:00:00Z",
+                         "--end", "2026-02-01T00:00:00+00:00"]) == 0
+
+        cfg = mock_run.call_args.args[1]
+        assert cfg.start.isoformat() == "2026-01-01T00:00:00+00:00"
+        assert cfg.end.isoformat() == "2026-02-01T00:00:00+00:00"
+
+    @pytest.mark.parametrize("args", [
+        ["--start", "2026-01-01T00:00:00Z"],
+        ["--start", "2026-01-01T00:00:00", "--end", "2026-02-01T00:00:00Z"],
+        ["--start", "2026-02-01T00:00:00Z", "--end", "2026-01-01T00:00:00Z"],
+    ])
+    def test_invalid_window_fails_before_engine_creation(self, args):
+        with patch("backtest.run_backtest.build_engine") as build_engine:
+            with pytest.raises(SystemExit):
+                main(["experiment", "--id", "bounded", *args])
+        build_engine.assert_not_called()
+
 
 class TestUnknownAndEmptyInvocation:
 
@@ -152,6 +174,22 @@ class TestDbtEnv:
 
 class TestFeaturesSubcommand:
 
+    @pytest.fixture(autouse=True)
+    def validation_fakes(self):
+        self.engine = MagicMock()
+        self.invalid = MagicMock()
+        self.valid = MagicMock()
+        self.invalid.return_value = "generation"
+        from contextlib import nullcontext
+        fake_module = SimpleNamespace(
+            build_validation_engine=lambda: self.engine,
+            feature_refresh_lock=lambda _engine: nullcontext(),
+            mark_features_invalid=self.invalid,
+            mark_features_valid=self.valid,
+        )
+        with patch.dict(sys.modules, {"ingestion.feature_validation": fake_module}):
+            yield
+
     def test_runs_deps_run_test_in_order_in_dbt_dir(self):
         with patch("cli.__main__.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
@@ -167,6 +205,9 @@ class TestFeaturesSubcommand:
         for c in mock_run.call_args_list:
             assert c.kwargs["cwd"] == "dbt"
         assert code == 0
+        self.invalid.assert_called_once_with(self.engine)
+        self.valid.assert_called_once_with(self.engine, "generation")
+        self.engine.dispose.assert_called_once()
 
     def test_stops_after_first_failing_step(self):
         with patch("cli.__main__.subprocess.run") as mock_run:
@@ -175,3 +216,17 @@ class TestFeaturesSubcommand:
 
         assert mock_run.call_count == 1
         assert code == 1
+        self.invalid.assert_called_once_with(self.engine)
+        self.valid.assert_not_called()
+        self.engine.dispose.assert_called_once()
+
+    def test_validation_state_brackets_build_in_order(self):
+        events = []
+        self.invalid.side_effect = lambda engine: events.append("invalid") or "generation"
+        self.valid.side_effect = lambda engine, generation: events.append("valid")
+        self.engine.dispose.side_effect = lambda: events.append("dispose")
+        with patch("cli.__main__.subprocess.run") as mock_run:
+            mock_run.side_effect = lambda args, **kwargs: (
+                events.append(args[1]) or MagicMock(returncode=0))
+            assert main(["features"]) == 0
+        assert events == ["invalid", "deps", "run", "test", "valid", "dispose"]

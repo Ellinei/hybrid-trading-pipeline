@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from statistics import stdev
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -348,6 +349,41 @@ class TestProcessMessageMalformed:
         proc._process_message(msg)
         assert "BTCUSDT" not in proc._buffers
 
+    @pytest.mark.parametrize("field,value", [
+        ("price", None), ("price", True), ("price", "NaN"),
+        ("price", "inf"), ("price", 0), ("price", -1),
+        ("quantity", None), ("quantity", False), ("quantity", "NaN"),
+        ("quantity", "-inf"), ("quantity", 0), ("quantity", -1),
+        ("timestamp", None), ("symbol", None), ("symbol", []),
+        ("symbol", ""), ("symbol", "   "),
+    ])
+    def test_invalid_trade_is_rejected_without_mutating_buffer(self, field, value):
+        proc = self._make_processor()
+        msg = {
+            "stream_type": "trade", "symbol": "BTCUSDT",
+            "timestamp": "2026-01-01T00:00:00Z", "price": "100", "quantity": "1",
+        }
+        proc._process_message(msg)
+        before = list(proc._buffers["BTCUSDT"])
+
+        proc._process_message({**msg, field: value})
+
+        assert proc._buffers == {"BTCUSDT": before}
+
+    @pytest.mark.parametrize("msg", [None, [], "trade", 42])
+    def test_non_object_payload_is_ignored(self, msg):
+        proc = self._make_processor()
+        proc._process_message(msg)
+        assert proc._buffers == {}
+
+    def test_missing_symbol_is_rejected(self):
+        proc = self._make_processor()
+        proc._process_message({
+            "stream_type": "trade", "timestamp": "2026-01-01T00:00:00Z",
+            "price": "100", "quantity": "1",
+        })
+        assert proc._buffers == {}
+
     def test_invalid_timestamp_format_does_not_crash_consumer(self):
         proc = self._make_processor()
         msg = {
@@ -359,3 +395,99 @@ class TestProcessMessageMalformed:
         }
         proc._process_message(msg)
         assert "BTCUSDT" not in proc._buffers
+
+
+class TestProcessorWindowRetention:
+    def _make_processor(self):
+        from streaming.feature_processor import FeatureProcessor
+
+        proc = FeatureProcessor.__new__(FeatureProcessor)
+        proc._buffers = {}
+        proc._last_flush = {}
+        proc._log = Mock()
+        proc._write_features = Mock()
+        return proc
+
+    def _add_trade(self, proc, timestamp, price=100.0, quantity=1.0):
+        proc._process_message({
+            "stream_type": "trade",
+            "symbol": "BTCUSDT",
+            "timestamp": timestamp.isoformat(),
+            "price": price,
+            "quantity": quantity,
+        })
+
+    def _flush(self, proc, now):
+        with patch("streaming.feature_processor.datetime") as clock:
+            clock.now.return_value = now
+            proc._maybe_flush_all()
+        return proc._write_features.call_args.args[0]
+
+    @pytest.mark.parametrize("trade_count", [100, 101, 250])
+    def test_busy_window_retains_every_trade(self, trade_count):
+        proc = self._make_processor()
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # A large early trade must still contribute after 100 newer trades.
+        self._add_trade(proc, now - timedelta(seconds=50), price=200.0, quantity=10.0)
+        for _ in range(trade_count - 1):
+            self._add_trade(proc, now - timedelta(seconds=10))
+
+        features = self._flush(proc, now)
+
+        assert features["trade_count_1m"] == trade_count
+        expected_vwap = (2000.0 + 100.0 * (trade_count - 1)) / (trade_count + 9)
+        assert features["vwap_1m"] == pytest.approx(expected_vwap)
+        assert features["vwap_5m"] == pytest.approx(expected_vwap)
+
+    def test_flush_prunes_expired_trades_and_keeps_five_minute_boundary(self):
+        proc = self._make_processor()
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._add_trade(proc, now - timedelta(minutes=6), price=1.0)
+        self._add_trade(proc, now - timedelta(minutes=5), price=200.0)
+        self._add_trade(proc, now - timedelta(seconds=10))
+
+        features = self._flush(proc, now)
+
+        assert len(proc._buffers["BTCUSDT"]) == 2
+        assert features["trade_count_1m"] == 1
+        assert features["vwap_1m"] == pytest.approx(100.0)
+        assert features["vwap_5m"] == pytest.approx(150.0)
+
+    def test_idle_symbol_retains_only_last_known_price(self):
+        proc = self._make_processor()
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._add_trade(proc, now - timedelta(minutes=7), price=200.0)
+        self._add_trade(proc, now - timedelta(minutes=6), price=150.0)
+
+        features = self._flush(proc, now)
+
+        assert len(proc._buffers["BTCUSDT"]) == 1
+        assert features["last_price"] == 150.0
+        assert features["trade_count_1m"] == 0
+        assert features["vwap_5m"] is None
+
+    def test_late_trade_preserves_event_time_price_change_and_last_price(self):
+        proc = self._make_processor()
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._add_trade(proc, now - timedelta(seconds=10), price=120.0)
+        self._add_trade(proc, now - timedelta(seconds=50), price=100.0)
+        self._add_trade(proc, now - timedelta(seconds=30), price=110.0)
+
+        features = self._flush(proc, now)
+
+        assert features["last_price"] == 120.0
+        assert features["price_change_1m"] == pytest.approx(20.0)
+        assert features["price_change_5m"] == pytest.approx(20.0)
+        assert features["trade_count_1m"] == 3
+        assert features["vwap_1m"] == pytest.approx(110.0)
+
+    def test_expired_late_trade_does_not_replace_idle_last_price(self):
+        proc = self._make_processor()
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._add_trade(proc, now - timedelta(minutes=6), price=120.0)
+        self._add_trade(proc, now - timedelta(minutes=7), price=100.0)
+
+        features = self._flush(proc, now)
+
+        assert features["last_price"] == 120.0
+        assert len(proc._buffers["BTCUSDT"]) == 1

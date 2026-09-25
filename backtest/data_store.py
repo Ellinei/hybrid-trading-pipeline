@@ -4,8 +4,8 @@ Every backtest run re-queried Postgres for the same multi-year dataset
 (four near-duplicate loaders across run_backtest.py/engine.py/
 signal_cache.py each did their own SELECT). This module is the shared
 DB-access layer underneath all of them: a snapshot is read from disk when
-its per-symbol fingerprint (row count + max timestamp) still matches the
-live table, and rebuilt automatically the moment it doesn't — so repeated
+its per-symbol fingerprint (row count, max timestamp, content digest) still
+matches the live table, and rebuilt automatically the moment it doesn't — so repeated
 experiment runs skip the DB entirely once warm, without ever silently
 serving stale data.
 
@@ -28,13 +28,24 @@ from sqlalchemy import text
 SNAPSHOT_DIR = "cache/snapshots"
 
 
-def _fingerprint_symbol(engine, table: str, symbol: str) -> tuple[int, str | None]:
-    """Cheap (row_count, max_timestamp) aggregate — the staleness signal,
-    far cheaper than re-reading the whole table to check if it changed."""
-    query = text(f"SELECT COUNT(*), MAX(timestamp) FROM {table} WHERE symbol = :symbol")
+def _fingerprint_symbol(engine, table: str, symbol: str) -> tuple[int, str | None, str]:
+    """Detect corrections as well as appended rows without transferring the table.
+
+    Hash each complete row, then hash the ordered row digests. This requires a
+    database scan but catches overlap repairs that leave count/max unchanged.
+    Legacy two-field snapshot metadata automatically misses this fingerprint.
+    """
+    if table not in {"raw.ohlcv", "features.feat_technical"}:
+        raise ValueError(f"Unsupported snapshot table: {table}")
+    query = text(
+        "SELECT COUNT(*), MAX(timestamp), "
+        "MD5(COALESCE(STRING_AGG(MD5(ROW_TO_JSON(source_row)::text), '' "
+        "ORDER BY timestamp), '')) "
+        f"FROM {table} AS source_row WHERE symbol = :symbol"
+    )
     with engine.connect() as conn:
-        count, max_ts = conn.execute(query, {"symbol": symbol}).fetchone()
-    return (count, str(max_ts) if max_ts is not None else None)
+        count, max_ts, digest = conn.execute(query, {"symbol": symbol}).fetchone()
+    return (count, str(max_ts) if max_ts is not None else None, digest)
 
 
 def _snapshot_paths(name: str) -> tuple[str, str]:
@@ -48,7 +59,7 @@ def _load_or_refresh(
     name: str,
     symbol: str,
     query_fn: Callable[[], pd.DataFrame],
-    fingerprint_fn: Callable[[], tuple[int, str | None]],
+    fingerprint_fn: Callable[[], tuple],
 ) -> pd.DataFrame:
     """Read the *name* snapshot from disk if its stored fingerprint matches
     *fingerprint_fn()*; otherwise call *query_fn()*, cache the result, and

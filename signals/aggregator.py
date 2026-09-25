@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from signals.base import AggregatedSignal, Signal, SignalDirection
 from signals.ml_model import MLSignalGenerator
+from signals.regime import regime_decision, utc_date
 from signals.sentiment import NeutralSentimentSignalGenerator, SentimentSignalGenerator
 from signals.technical import TechnicalSignalGenerator
 
@@ -59,12 +60,9 @@ class SignalAggregator:
         Pass pre-built *technical*/*ml* generators to inject non-default
         rule/threshold parameters (backtest sweeps, A/B toggles).
 
-        *regime* is an optional dict[date, RegimeState] (signals.regime,
-        Phase 12) — a daily BTC macro regime gate that blocks new BUYs
-        when RISK_OFF. Mirrors ReplayAggregator's identical gate so
-        backtest and live share the same semantics. None (the default)
-        is a no-op — not yet enabled by default; Phase 13 wires it on via
-        StrategyConfig.
+        *regime* maps UTC entry dates to a classification from the previous
+        complete BTC day. When enabled, RISK_OFF, missing and invalid states
+        block new BUYs. None deliberately disables the gate. SELLs proceed.
 
         *sentiment_enabled* (default True) — when False, live cycles
         (as_of=None) use the neutral sentiment generator too, matching
@@ -133,21 +131,30 @@ class SignalAggregator:
         else:
             direction = SignalDirection.HOLD
 
-        # Regime gate: blocks new BUYs in a RISK_OFF macro regime; never
-        # blocks SELL (exits must always work) or an already-HOLD signal.
-        # getattr, not self._regime: existing tests construct this class
-        # via __new__ (bypassing __init__) and don't set the attribute.
+        # Regime state is recorded for every decision, including SELL and HOLD.
+        # An enabled but unavailable classification blocks only new BUYs.
         regime = getattr(self, "_regime", None)
-        if direction == SignalDirection.BUY and regime is not None:
-            from signals.regime import RegimeState
-            if regime.get(now.date()) == RegimeState.RISK_OFF:
-                direction = SignalDirection.HOLD
+        decision = regime_decision(regime, utc_date(now), getattr(self, "_regime_refresh_error", None))
+        entry_blocked = direction == SignalDirection.BUY and decision.blocking_reason is not None
+        if entry_blocked:
+            direction = SignalDirection.HOLD
+        if regime is not None or getattr(self, "_regime_refresh_error", None):
+            signals.append(Signal(
+                direction=SignalDirection.HOLD, confidence=0.0,
+                source="regime", symbol=symbol, timestamp=now,
+                metadata={"state": decision.state.value if decision.state else None,
+                          "source_date": decision.source_date.isoformat() if decision.source_date else None,
+                          "blocking_reason": decision.blocking_reason,
+                          "entry_blocked": entry_blocked},
+            ))
 
         confidence = min(abs(score), 1.0)
 
         # Human-readable reasoning
         parts = []
         for s in signals:
+            if s.source == "regime":
+                continue
             m    = s.metadata
             name = _DISPLAY_NAME.get(s.source, s.source)
             if s.source == "technical":
@@ -164,6 +171,10 @@ class SignalAggregator:
             f"{direction.value} signal (confidence: {confidence:.2f}) | "
             + " | ".join(parts)
         )
+        if regime is not None or getattr(self, "_regime_refresh_error", None):
+            reasoning += (f" | regime={decision.state.value if decision.state else 'unavailable'}"
+                          f" source_date={decision.source_date}"
+                          f" block_reason={decision.blocking_reason or 'none'}")
 
         result = AggregatedSignal(
             direction=direction, confidence=confidence,

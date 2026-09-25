@@ -1,11 +1,11 @@
 # Hybrid Trading Pipeline
 
-**Production-grade hybrid streaming + batch data pipeline for AI-driven crypto trading on Binance.**
+**Hybrid streaming + batch research pipeline for crypto strategy evaluation and paper trading on Binance market data.**
 
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.13-blue)
-![Tests](https://img.shields.io/badge/tests-159%20passing-brightgreen)
+See the latest verification record in [the implementation log](log/phase13-implementation-progress.md).
 
 ## Architecture Overview
 
@@ -14,11 +14,11 @@ See [docs/architecture.md](docs/architecture.md) for the full system diagram and
 The pipeline runs two layers in concert:
 
 - **Streaming layer** — Binance WebSocket → Redpanda/Kafka → real-time feature processor writes VWAP, volatility, and trade-count snapshots to TimescaleDB every 60 seconds.
-- **Batch layer** — Airflow orchestrates daily OHLCV backfills and dbt model runs that build clean staging views and a `features.feat_technical` table (25 technical features including RSI, MACD, Bollinger Bands, ATR, stochastic, candle structure) from the raw data.
+- **Batch layer** — Airflow runs an hourly chain of completed-candle backfill and dbt build/tests, producing clean staging views and a `features.feat_technical` table (including RSI, MACD, Bollinger Bands, ATR, stochastic, and candle structure).
 
-Both layers feed a **multi-signal fusion engine** that combines rule-based technical analysis, an **XGBoost** direction model (18 features, hyperparameter-tuned via GridSearchCV + TimeSeriesSplit), and **VADER**-scored RSS sentiment into a single BUY / HOLD / SELL decision with confidence score.
+The **multi-signal fusion engine** combines technical rules and an **XGBoost** model with 18 features into BUY / HOLD / SELL decisions. RSS sentiment is available but disabled in the adopted strategy to match historical evaluation. Streaming snapshots are monitored separately; the current strategy uses batch technical features. Its BTC macro regime filter permits entries only when the prior completed UTC day's classification is available and risk-on.
 
-Live execution places real **OCO (One-Cancels-Other) orders** on Binance — entry + stop-loss + take-profit atomically — with exchange filter compliance (lot size, min notional, price precision). A historical **backtest harness** replays the live signal/risk/execution logic against OHLCV history, and a parameter sweep identifies optimal `RiskConfig` settings.
+Execution supports Binance entries and protective **OCO (One-Cancels-Other) orders**, with exchange filter checks, and a separate persistent paper account. A historical **backtest harness** evaluates signal/risk logic against OHLCV history with walk-forward training and cached predictions. Paper fills, bar-based historical fills, and exchange execution have different limitations; see the operations guide.
 
 ## Tech Stack
 
@@ -27,9 +27,9 @@ Live execution places real **OCO (One-Cancels-Other) orders** on Binance — ent
 | Market data | Binance API (WebSocket + REST, testnet-ready) |
 | Message broker | **Redpanda** (Kafka-compatible, dual listeners) |
 | Orchestration | **Apache Airflow 2.8** (custom Docker image) |
-| Transformations | **dbt 1.7** — staging → intermediate → features |
+| Transformations | **dbt** — staging → intermediate → features; versions pinned in Poetry and the Airflow image |
 | Storage | **PostgreSQL 15 + TimescaleDB** (hypertables) |
-| ML model | **XGBoost** (next-hour price-direction classifier, 18 features) |
+| ML model | **XGBoost** (8-bar return above a 0.3% hurdle, 18 features) |
 | Sentiment | **VADER + public RSS** (CoinDesk, Cointelegraph, CryptoPanic) |
 | Execution | **Binance OCO orders** — stop-loss + take-profit on entry |
 | Backtesting | Custom engine + 192-combo parameter sweep |
@@ -77,13 +77,8 @@ poetry run python -m ingestion.validate
 ## Running the Signal Engine
 
 ```bash
-# Build dbt feature models (run after backfill)
-cd dbt
-DBT_POSTGRES_HOST=localhost DBT_POSTGRES_PORT=5433 \
-DBT_POSTGRES_USER=trader DBT_POSTGRES_PASSWORD=test \
-DBT_POSTGRES_DB=trading \
-dbt deps --profiles-dir . && dbt run --profiles-dir . && dbt test --profiles-dir .
-cd ..
+# Build and validate features, then publish their entry-readiness state
+poetry run python -m cli features
 
 # Train the XGBoost direction model (runs GridSearchCV hyperparameter tuning)
 poetry run python -m signals.ml_model
@@ -103,6 +98,12 @@ poetry run python -m streaming.feature_processor
 ```
 
 ## Backtesting
+
+New operations features are available through `python -m cli trade --paper`
+and the dashboard's **Operations** and **Experiments** pages. The bot checks
+source-data freshness before new entries and journals all signal decisions.
+See [Operations guide](docs/operations.md) for setup, thresholds, paper-account
+cost assumptions, and experiment comparisons.
 
 ```bash
 # Replay the full strategy against historical OHLCV data
@@ -138,8 +139,7 @@ hybrid-trading-pipeline/
 │   ├── Dockerfile              # Custom image: Airflow + dbt + project deps
 │   ├── requirements.txt
 │   └── dags/
-│       ├── ohlcv_backfill_dag.py
-│       └── dbt_features_dag.py
+│       └── ohlcv_backfill_dag.py # Hourly ingestion → validated features
 ├── dbt/                        # Staging / intermediate / features models
 │   ├── models/
 │   │   ├── staging/            # stg_ohlcv (view)
@@ -150,7 +150,7 @@ hybrid-trading-pipeline/
 ├── signals/                    # Multi-signal fusion engine
 │   ├── base.py                 # Signal + AggregatedSignal dataclasses
 │   ├── technical.py            # Rule-based: RSI, MACD, Bollinger Bands
-│   ├── ml_model.py             # XGBoost: next-hour direction, 18 features
+│   ├── ml_model.py             # XGBoost: 8-bar return hurdle, 18 features
 │   ├── sentiment.py            # VADER + RSS feeds
 │   └── aggregator.py           # Weighted fusion -> BUY / HOLD / SELL
 ├── execution/                  # Live order execution
@@ -168,7 +168,7 @@ hybrid-trading-pipeline/
 ├── dashboard/
 │   └── app.py                  # Streamlit P&L and signal monitoring
 ├── models/                     # Saved ML artifacts (XGBoost + scaler .pkl)
-├── tests/                      # 159 tests covering all layers
+├── tests/                      # Regression and integration checks across layers
 └── docker/
     └── postgres/
         └── init.sql
@@ -187,8 +187,15 @@ hybrid-trading-pipeline/
 - [x] **Phase 8.5** — 192-combo RiskConfig parameter sweep with `_CachingAggregator` (pre-computes signals once, 192x in-memory replay)
 - [x] **Phase 8.6** — Feature engineering: 18 ML features (up from 8); dbt models extended with candle structure, multi-horizon returns, trend position, volume conviction; accuracy 50.3% → 54.2%, win rate 32% → 69%
 - [x] **Phase 8.7** — XGBoost hyperparameter tuning via GridSearchCV + TimeSeriesSplit; fine-grained 72-combo stop-loss sweep; first profitable backtest configs found (PF 1.19, +0.37% return at SL=1.0xATR, conf>=0.62, size=1.5%)
-- [ ] **Phase 9** — Walk-forward ML retraining (rolling window; eliminates in-sample bias in backtest)
-- [ ] **Phase 10** — Enable testnet live trading once walk-forward confirms positive expected value
+- [x] **Phase 9** — Rolling walk-forward retraining and chronological replay
+- [x] **Phase 10–11** — Experiment ledger, probability caching, CLI experiments, reports, and parity checks
+- [x] **Phase 12** — Macro regime candidates and historical exp008 evaluation; its recorded acceptance requires reassessment after correcting daily timing
+- [ ] **Phase 13** — Complete causal evaluation, reproducible training, hourly data refresh, and a documented paper trial; operations features are implemented, forward evidence remains outstanding
+- [ ] **Testnet execution milestone** — Evaluate readiness after corrected historical and forward results
+
+See [the current next-move plan](docs/next-move-2026-09-23.md) and
+[implementation progress](log/phase13-implementation-progress.md). Earlier phase
+metrics above are historical records, not current validation claims.
 
 ## License
 

@@ -32,6 +32,7 @@ from backtest.metrics import (
     per_symbol_metrics,
 )
 from backtest.run_backtest import (
+    PROB_CACHE_ALGORITHM_VERSION,
     _build_cache_meta,
     _compute_cache_key,
     _feature_fingerprint,
@@ -73,6 +74,21 @@ class ExperimentConfig:
     regime_candidate: str | None = None
     """Key into signals.regime.REGIME_FUNCTIONS (e.g. "r1_sma200"), or
     None to disable the Phase 12 regime gate entirely."""
+    start: datetime | None = None
+    end: datetime | None = None
+
+    def __post_init__(self) -> None:
+        """A specified evaluation window is UTC [start, end)."""
+        if (self.start is None) != (self.end is None):
+            raise ValueError("Evaluation --start and --end must be supplied together")
+        for name in ("start", "end"):
+            value = getattr(self, name)
+            if value is not None:
+                if value.tzinfo is None or value.utcoffset() is None:
+                    raise ValueError(f"Evaluation {name} must include a UTC offset")
+                setattr(self, name, value.astimezone(timezone.utc))
+        if self.start is not None and self.start >= self.end:
+            raise ValueError("Evaluation start must be earlier than end")
 
 
 def _git_sha() -> str:
@@ -98,12 +114,26 @@ def resolve_prob_cache(
 ) -> tuple[dict, object, str]:
     """Return (prob_map, feature_df, cache_path) for *cfg* — reusing an
     existing content-addressed cache file when one already matches this
-    exact (symbols, labels, schedule, feature-data) combination, else
-    building and saving a new one. Every distinct experiment config gets
-    its own auto-named cache; no manual --save-cache/--load-cache
-    bookkeeping required.
+    exact (symbols, labels, schedule, feature-data, raw-bar-stream,
+    algorithm-version) combination, else building and saving a new one.
+    Every distinct experiment config gets its own auto-named cache; no
+    manual --save-cache/--load-cache bookkeeping required.
+
+    *bars_by_symbol* must be FULL history, not the evaluation-window-
+    filtered replay bars — walk-forward training and regime warm-up need
+    complete history, and the raw bar stream is itself part of the cache's
+    identity (see _compute_cache_key): repairing, inserting, or removing an
+    OHLCV bar can shift retrain boundaries without changing the feature-
+    table fingerprint, so it must be hashed into the key too, alongside the
+    algorithm version (bumped whenever probability generation itself
+    changes, e.g. the sparse-label-leak fix, even if source rows didn't).
     """
     fingerprint = _feature_fingerprint(engine, cfg.symbols)
+    bar_stream = sorted(
+        (bar.timestamp, sym)
+        for sym in cfg.symbols
+        for bar in bars_by_symbol.get(sym, [])
+    )
     key = _compute_cache_key(
         label_horizon=MLSignalGenerator.LABEL_HORIZON_BARS,
         label_min_return=MLSignalGenerator.LABEL_MIN_RETURN,
@@ -112,20 +142,23 @@ def resolve_prob_cache(
         train_window_days=cfg.train_window_days,
         symbols=cfg.symbols,
         fingerprint=fingerprint,
+        algorithm_version=PROB_CACHE_ALGORITHM_VERSION,
+        bar_stream=bar_stream,
     )
     cache_path = _cache_path_for_key(key)
 
     if os.path.exists(cache_path):
         with open(cache_path, "rb") as f:
             cache = pickle.load(f)
-        return cache["prob_map"], cache["feature_df"], cache_path
+        meta = cache.get("meta", {})
+        if meta.get("cache_key") == key and meta.get("algorithm_version") is not None:
+            return cache["prob_map"], cache["feature_df"], cache_path
+        # A file happens to sit at this path but its stored meta doesn't
+        # verify (legacy pre-algorithm-version cache, or a stale/mismatched
+        # key) — never silently reuse it; it may predate the sparse-label-
+        # leak fix. Fall through and rebuild.
 
     feature_df = _load_all_features(engine, cfg.symbols)
-    bar_stream = sorted(
-        (bar.timestamp, sym)
-        for sym in cfg.symbols
-        for bar in bars_by_symbol.get(sym, [])
-    )
     prob_map = precompute_walk_forward_probs(
         feature_df, bar_stream,
         min_train_days=cfg.min_train_days,
@@ -134,6 +167,7 @@ def resolve_prob_cache(
     )
     meta = _build_cache_meta(
         engine, cfg.symbols, cfg.min_train_days, cfg.walk_forward_months, cfg.train_window_days,
+        bar_stream=bar_stream,
     )
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "wb") as f:
@@ -144,7 +178,7 @@ def resolve_prob_cache(
     return prob_map, feature_df, cache_path
 
 
-def _compute_metrics(result, regime: dict | None = None) -> dict:
+def _compute_metrics(result, regime: dict | None = None, replay_days: set | None = None) -> dict:
     metrics = {
         "trade_count": result.metrics["trade_count"],
         "win_rate": result.metrics["win_rate"],
@@ -159,11 +193,27 @@ def _compute_metrics(result, regime: dict | None = None) -> dict:
         "max_single_trade_profit_share": max_single_trade_profit_share(result.trades),
     }
     if regime is not None:
-        from signals.regime import days_blocked_pct
+        from signals.regime import RegimeState, days_blocked_pct
         # The Phase 12 pre-registration's explicit diagnostic: catches an
-        # exp005-style over-blocking filter (~80% days blocked) before it
-        # reaches the acceptance gate.
-        metrics["regime_days_blocked_pct"] = days_blocked_pct(regime)
+        # exp005-style over-blocking filter before it reaches the
+        # acceptance gate. Score over the replay days actually evaluated
+        # (callers with no *replay_days* fall back to regime's own keys,
+        # the pre-fix scope). A day with NO classification blocks BUY
+        # exactly like RISK_OFF does (enabled-but-unavailable gate) and
+        # must count as blocked here too — the original diagnostic silently
+        # reported 0% blocked whenever every scored day lacked a
+        # classification (e.g. after a BTC data gap or during warm-up).
+        days = replay_days if replay_days is not None else set(regime)
+        total = len(days)
+        classified = [d for d in days if isinstance(regime.get(d), RegimeState)]
+        risk_off = sum(1 for d in classified if regime[d] == RegimeState.RISK_OFF)
+        unavailable = total - len(classified)
+        metrics["regime_days_blocked_pct"] = days_blocked_pct(regime, days)
+        # Kept separately at the pre-fix metric's exact definition (RISK_OFF
+        # share of classified days only) so older exp008-era ledger rows
+        # stay comparable to new runs.
+        metrics["regime_days_risk_off_pct"] = risk_off / len(classified) * 100 if classified else 0.0
+        metrics["regime_days_unavailable_pct"] = unavailable / total * 100 if total else 0.0
     return metrics
 
 
@@ -174,7 +224,7 @@ def _resolve_regime(engine, cfg: ExperimentConfig, bars_by_symbol: dict) -> dict
     the traded symbols in this run."""
     if cfg.regime_candidate is None:
         return None
-    from signals.regime import REGIME_FUNCTIONS, resample_daily_close
+    from signals.regime import REGIME_FUNCTIONS, build_causal_regime
 
     if cfg.regime_candidate not in REGIME_FUNCTIONS:
         raise ValueError(
@@ -182,8 +232,7 @@ def _resolve_regime(engine, cfg: ExperimentConfig, bars_by_symbol: dict) -> dict
             f"Choices: {sorted(REGIME_FUNCTIONS)}"
         )
     btc_bars = bars_by_symbol.get("BTCUSDT") or _load_bars(engine, "BTCUSDT", None, None)
-    daily_close = resample_daily_close(btc_bars)
-    return REGIME_FUNCTIONS[cfg.regime_candidate](daily_close)
+    return build_causal_regime(btc_bars, cfg.regime_candidate)
 
 
 def _build_ledger_row(cfg: ExperimentConfig, metrics: dict, git_sha: str, data_range: str) -> str:
@@ -212,7 +261,8 @@ def _data_range(equity_curve) -> str:
     return f"{start}..{end}"
 
 
-def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str, regime: dict | None = None) -> str:
+def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str, regime: dict | None = None,
+                      replay_days: set | None = None) -> str:
     out_dir = os.path.join(cfg.output_dir, cfg.exp_id)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -227,12 +277,15 @@ def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str, regime: dic
         writer.writerow(["timestamp", "equity"])
         writer.writerows(result.equity_curve)
 
-    metrics = _compute_metrics(result, regime)
+    metrics = _compute_metrics(result, regime, replay_days)
     with open(os.path.join(out_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2, default=str)
 
     git_sha = _git_sha()
     config_dump = asdict(cfg)
+    config_dump["start"] = cfg.start.isoformat() if cfg.start else None
+    config_dump["end"] = cfg.end.isoformat() if cfg.end else None
+    config_dump["evaluation_interval"] = "[start, end) UTC"
     config_dump["git_sha"] = git_sha
     config_dump["cache_path"] = cache_path
     config_dump["generated_at"] = datetime.now(timezone.utc).isoformat()
@@ -244,7 +297,11 @@ def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str, regime: dic
     with open(os.path.join(out_dir, "report.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    ledger_row = _build_ledger_row(cfg, metrics, git_sha, _data_range(result.equity_curve))
+    data_range = (
+        f"{cfg.start.isoformat()}..{cfg.end.isoformat()} (end exclusive)"
+        if cfg.start is not None else _data_range(result.equity_curve)
+    )
+    ledger_row = _build_ledger_row(cfg, metrics, git_sha, data_range)
     with open(os.path.join(out_dir, "ledger_row.md"), "w", encoding="utf-8") as f:
         f.write(ledger_row + "\n")
 
@@ -279,12 +336,22 @@ def run_experiment(engine, cfg: ExperimentConfig) -> dict:
 
     backtest_config = BacktestConfig(
         symbols=cfg.symbols,
-        start=datetime(1970, 1, 1, tzinfo=timezone.utc),
-        end=datetime.now(timezone.utc),
+        start=cfg.start or datetime(1970, 1, 1, tzinfo=timezone.utc),
+        end=cfg.end or datetime.now(timezone.utc),
         risk_config=RiskConfig(max_hold_bars=cfg.max_hold_bars),
     )
+    # The engine currently iterates every supplied bar and does not enforce
+    # BacktestConfig.start/end. Keep complete history above for walk-forward
+    # training and regime warmup, then pass only scored bars to the replay.
+    replay_bars = {
+        symbol: [bar for bar in bars
+                 if backtest_config.start <= bar.timestamp < backtest_config.end]
+        for symbol, bars in bars_by_symbol.items()
+    }
+    from signals.regime import utc_date
+    replay_days = {utc_date(bar.timestamp) for bars in replay_bars.values() for bar in bars}
     result = run_backtest(
-        bars_by_symbol=bars_by_symbol,
+        bars_by_symbol=replay_bars,
         atr_by_symbol=atr_by_symbol,
         filters_by_symbol=filters_by_symbol,
         aggregator=aggregator,
@@ -292,7 +359,7 @@ def run_experiment(engine, cfg: ExperimentConfig) -> dict:
         walk_forward_months=0,
     )
 
-    out_dir = _write_artifacts(cfg, result, cache_path, regime)
-    metrics = _compute_metrics(result, regime)
+    out_dir = _write_artifacts(cfg, result, cache_path, regime, replay_days)
+    metrics = _compute_metrics(result, regime, replay_days)
     metrics["_output_dir"] = out_dir
     return metrics

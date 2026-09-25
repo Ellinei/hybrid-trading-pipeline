@@ -11,7 +11,7 @@ from __future__ import annotations
 import functools
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import structlog
@@ -98,11 +98,13 @@ class BinanceClientWrapper:
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         limit: int = 1000,
+        as_of: datetime | None = None,
     ) -> pd.DataFrame:
         """Fetch OHLCV candles and return a UTC-aware DataFrame.
 
-        Returns an empty DataFrame (with correct columns) when the API
-        returns no data.
+        A candle is returned only after its exchange close_time has passed.
+        Returns an empty DataFrame (with correct columns) when no completed
+        candles are available.
         """
         start_ms = (
             str(int(start_date.timestamp() * 1000)) if start_date else None
@@ -118,7 +120,13 @@ class BinanceClientWrapper:
         if not klines:
             return pd.DataFrame(columns=_OHLCV_COLS)
 
+        cutoff = as_of or datetime.now(timezone.utc)
+        if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
         df = pd.DataFrame(klines, columns=_KLINE_COLS)
+        df = df[pd.to_numeric(df["close_time"]) < int(cutoff.timestamp() * 1000)].copy()
+        if df.empty:
+            return pd.DataFrame(columns=_OHLCV_COLS)
         df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         df["symbol"] = symbol
 

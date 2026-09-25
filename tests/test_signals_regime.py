@@ -23,6 +23,7 @@ from signals.regime import (
     compute_regime_r4_composite,
     days_blocked_pct,
     resample_daily_close,
+    utc_date,
 )
 
 _START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -191,7 +192,47 @@ class TestDaysBlockedPct:
             date(2026, 1, 3): RegimeState.RISK_OFF,
             date(2026, 1, 4): RegimeState.RISK_ON,
         }
-        assert days_blocked_pct(regime) == pytest.approx(50.0)
+        days = set(regime)
+        assert days_blocked_pct(regime, days) == pytest.approx(50.0)
 
-    def test_empty_regime_returns_zero(self):
-        assert days_blocked_pct({}) == 0.0
+    def test_empty_days_returns_zero(self):
+        assert days_blocked_pct({}, set()) == 0.0
+
+    def test_unclassified_days_count_as_blocked_not_zero(self):
+        """The exact defect this module used to have: an empty (or
+        gapped) regime dict over a non-empty scored-days set is 100%
+        blocked, not 0% — matches
+        backtest.experiment._compute_metrics semantics."""
+        days = {date(2026, 1, 1), date(2026, 1, 2)}
+        assert days_blocked_pct({}, days) == pytest.approx(100.0)
+
+    def test_missing_days_mixed_with_classified_days(self):
+        regime = {date(2026, 1, 1): RegimeState.RISK_ON}
+        days = {date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)}
+        # day 1 RISK_ON (not blocked), days 2 and 3 unclassified (blocked)
+        assert days_blocked_pct(regime, days) == pytest.approx(200 / 3)
+
+    def test_regime_keys_outside_days_are_ignored(self):
+        regime = {
+            date(2026, 1, 1): RegimeState.RISK_OFF,
+            date(2026, 1, 9): RegimeState.RISK_OFF,  # not in days
+        }
+        days = {date(2026, 1, 1)}
+        assert days_blocked_pct(regime, days) == pytest.approx(100.0)
+
+
+class TestUtcDate:
+
+    def test_naive_datetime_treated_as_already_utc(self):
+        naive = datetime(2026, 1, 1, 23, 30)
+        assert utc_date(naive) == date(2026, 1, 1)
+
+    def test_non_utc_aware_datetime_normalized_to_utc_calendar_day(self):
+        # UTC+10 at 05:30 local == Dec 31 19:30 UTC -- the previous day.
+        plus10 = timezone(timedelta(hours=10))
+        local = datetime(2026, 1, 1, 5, 30, tzinfo=plus10)
+        assert utc_date(local) == date(2025, 12, 31)
+
+    def test_utc_aware_datetime_unchanged(self):
+        aware = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+        assert utc_date(aware) == date(2026, 1, 1)

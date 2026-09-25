@@ -61,6 +61,7 @@ def _load_all_features(db_engine, symbols: list[str]):
     full = pd.concat(frames, ignore_index=True).sort_values(["symbol", "timestamp"])
     horizon = MLSignalGenerator.LABEL_HORIZON_BARS
     full["future_close"] = full.groupby("symbol")["close"].shift(-horizon)
+    full["future_timestamp"] = full.groupby("symbol")["timestamp"].shift(-horizon)
     full["target"] = MLSignalGenerator.compute_target(full["close"], full["future_close"])
     full = full.dropna(subset=["future_close"])
     return full.reset_index(drop=True)
@@ -193,7 +194,6 @@ def run_backtest(
     many days instead of an expanding all-history window — bounds retrain
     cost on multi-year datasets.
     """
-    import pandas as pd
 
     state = BacktestState(balance=config.initial_balance)
     risk = SimulatedRiskManager(
@@ -232,19 +232,15 @@ def run_backtest(
             if next_retrain_at is None:
                 next_retrain_at = timestamp + timedelta(days=min_train_days)
             if timestamp >= next_retrain_at:
-                # Exclude the final label-horizon hours: a row's target uses
-                # the close LABEL_HORIZON_BARS after it, so rows newer than
-                # (now - horizon) have labels that peek past "now" — training
-                # on them leaks future prices into the model.
+                # The label horizon counts feature rows, which can span more
+                # than horizon clock hours when data has gaps. Check the
+                # actual forward-close timestamp before fitting.
                 from signals.ml_model import MLSignalGenerator
-                label_cutoff = pd.Timestamp(timestamp) - timedelta(
-                    hours=MLSignalGenerator.LABEL_HORIZON_BARS
+                from backtest.signal_cache import available_training_rows
+                slice_df = available_training_rows(
+                    feature_df, timestamp, MLSignalGenerator.LABEL_HORIZON_BARS,
+                    train_window_days,
                 )
-                mask = feature_df["timestamp"] < label_cutoff
-                if train_window_days > 0:
-                    window_start = label_cutoff - timedelta(days=train_window_days)
-                    mask &= feature_df["timestamp"] >= window_start
-                slice_df = feature_df[mask].copy()
                 # Tune once (first boundary, full GridSearchCV) then freeze
                 # — mirrors backtest.signal_cache.precompute_walk_forward_probs
                 # so both walk-forward code paths behave consistently and

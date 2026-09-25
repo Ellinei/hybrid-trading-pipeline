@@ -64,8 +64,44 @@ def load_feature_matrix(db_engine, symbols: list[str]):
     full = pd.concat(frames, ignore_index=True).sort_values(["symbol", "timestamp"])
     horizon = MLSignalGenerator.LABEL_HORIZON_BARS
     full["future_close"] = full.groupby("symbol")["close"].shift(-horizon)
+    full["future_timestamp"] = full.groupby("symbol")["timestamp"].shift(-horizon)
     full["target"] = MLSignalGenerator.compute_target(full["close"], full["future_close"])
     return full.reset_index(drop=True)
+
+
+def available_training_rows(feature_df, boundary: datetime, horizon: int,
+                            train_window_days: int = 0):
+    """Rows whose actual forward close existed before a retrain boundary.
+
+    Older in-memory frames may lack future_timestamp. Derive it from each
+    symbol's ordered timestamps; without a symbol, only a unique single-series
+    timestamp sequence can be derived safely. Unknown labels are excluded.
+    The clock-hour cutoff remains as a conservative policy for gapless parity.
+    """
+    import pandas as pd
+
+    cutoff = pd.Timestamp(boundary) - timedelta(hours=horizon)
+    frame = feature_df.copy()
+    if "future_timestamp" in frame:
+        reveal = pd.to_datetime(frame["future_timestamp"], utc=True)
+    elif "timestamp" not in frame:
+        reveal = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]")
+    elif "symbol" in frame:
+        ordered = frame.sort_values(["symbol", "timestamp"])
+        reveal = ordered.groupby("symbol")["timestamp"].shift(-horizon).reindex(frame.index)
+    elif frame["timestamp"].is_unique:
+        ordered = frame.sort_values("timestamp")
+        reveal = ordered["timestamp"].shift(-horizon).reindex(frame.index)
+    else:
+        reveal = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]")
+    reveal = pd.to_datetime(reveal, utc=True)
+    row_time = pd.to_datetime(frame["timestamp"], utc=True)
+    mask = (row_time < cutoff) & (reveal > row_time) & (reveal < pd.Timestamp(boundary))
+    if "future_close" in frame:
+        mask &= frame["future_close"].notna()
+    if train_window_days > 0:
+        mask &= row_time >= cutoff - timedelta(days=train_window_days)
+    return frame[mask].copy()
 
 
 def precompute_walk_forward_probs(
@@ -137,18 +173,12 @@ def precompute_walk_forward_probs(
                 probs[key] = float(prob)
         pending.clear()
 
-    import pandas as pd
-
     for ts, symbol in bar_stream:
         if next_retrain_at is None:
             next_retrain_at = ts + timedelta(days=min_train_days)
         if ts >= next_retrain_at:
             _flush_pending()
-            label_cutoff = pd.Timestamp(ts) - timedelta(hours=horizon)
-            mask = (feature_df["timestamp"] < label_cutoff) & feature_df["future_close"].notna()
-            if train_window_days > 0:
-                mask &= feature_df["timestamp"] >= label_cutoff - timedelta(days=train_window_days)
-            slice_df = feature_df[mask].copy()
+            slice_df = available_training_rows(feature_df, ts, horizon, train_window_days)
             # Tune once (first boundary, full GridSearchCV) then freeze —
             # ~35 windows/run previously each ran an 8x5-fold search
             # (~1,400 fits/run); every later boundary now does one fit.
@@ -193,11 +223,8 @@ class ReplayAggregator:
     ):
         self.params = params or FusionParams()
         self._probs = prob_map
-        # Phase 12: optional daily BTC regime gate (dict[date, RegimeState]
-        # from signals.regime) — a post-fusion overlay, not a FusionParams
-        # field, since it's computed once and shared across every
-        # fusion-knob sweep rather than varying per sweep point. None (the
-        # default) is the pre-Phase-12 no-gate behavior, unchanged.
+        # UTC entry-date map from the prior complete BTC day. None disables
+        # the gate; an empty map means enabled with unavailable history.
         self._regime = regime
         self._ts_index: dict[str, list] = {}
         self._rows: dict[str, list[dict]] = {}
@@ -251,12 +278,15 @@ class ReplayAggregator:
         else:
             direction = SignalDirection.HOLD
 
-        # Regime gate: blocks new BUYs in a RISK_OFF macro regime; never
-        # blocks SELL (exits must always work) or an already-HOLD signal.
-        if direction == SignalDirection.BUY and self._regime is not None:
-            from signals.regime import RegimeState
-            if self._regime.get(as_of.date()) == RegimeState.RISK_OFF:
-                direction = SignalDirection.HOLD
+        from signals.regime import regime_decision, utc_date
+        decision = regime_decision(self._regime, utc_date(as_of))
+        if direction == SignalDirection.BUY and decision.blocking_reason is not None:
+            direction = SignalDirection.HOLD
+        reasoning = "replay"
+        if self._regime is not None:
+            reasoning += (f" | regime={decision.state.value if decision.state else 'unavailable'}"
+                          f" source_date={decision.source_date}"
+                          f" block_reason={decision.blocking_reason or 'none'}")
 
         return AggregatedSignal(
             direction=direction,
@@ -264,6 +294,6 @@ class ReplayAggregator:
             symbol=symbol,
             timestamp=as_of,
             signals=[],
-            reasoning="replay",
+            reasoning=reasoning,
             weights_used=p.weights,
         )

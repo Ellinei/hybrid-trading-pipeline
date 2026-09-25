@@ -34,3 +34,5 @@ class StrategyConfig:
     max_hold_bars: int = 24
     regime_candidate: str | None = "r1_sma200"
     sentiment_enabled: bool = False
+    candle_max_age_seconds: int = 10800
+    feature_max_age_seconds: int = 10800

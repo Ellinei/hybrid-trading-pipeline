@@ -15,7 +15,7 @@ import json
 import os
 import pickle
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -31,6 +31,8 @@ from backtest.experiment import (
     _write_artifacts,
     resolve_prob_cache,
 )
+from backtest.run_backtest import PROB_CACHE_ALGORITHM_VERSION, _compute_cache_key
+from signals.ml_model import MLSignalGenerator
 
 
 @dataclass
@@ -246,6 +248,28 @@ class TestResolveRegime:
         assert mock_load.call_args[0][1] == "BTCUSDT"
         assert regime is not None
 
+    def test_regime_for_intraday_entry_uses_prior_complete_utc_day(self):
+        first = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        bars = [
+            OHLCVBar(timestamp=first + timedelta(days=day, hours=hour),
+                     open=100.0, high=101.0, low=1.0,
+                     close=1.0 if day == 199 else 100.0)
+            for day in range(200) for hour in range(24)
+        ]
+        decision_day = (first + timedelta(days=200)).date()
+        cfg = ExperimentConfig(exp_id="bounded", regime_candidate="r1_sma200")
+        prefix = _resolve_regime(MagicMock(), cfg, {"BTCUSDT": bars})
+        future = [
+            OHLCVBar(timestamp=first + timedelta(days=200, hours=hour),
+                     open=100.0, high=1000.0, low=99.0, close=1000.0)
+            for hour in range(24)
+        ]
+        with_future = _resolve_regime(MagicMock(), cfg, {"BTCUSDT": bars + future})
+
+        from signals.regime import RegimeState
+        assert prefix[decision_day] == RegimeState.RISK_OFF
+        assert with_future[decision_day] == prefix[decision_day]
+
 
 class TestResolvePreCache:
 
@@ -265,7 +289,9 @@ class TestResolvePreCache:
             cache_path = _cache_path_for_key("fixedkey" * 8)
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, "wb") as f:
-                pickle.dump({"prob_map": {"cached": True}, "feature_df": self._feature_df()}, f)
+                pickle.dump({"prob_map": {"cached": True}, "feature_df": self._feature_df(),
+                             "meta": {"cache_key": "fixedkey" * 8,
+                                      "algorithm_version": PROB_CACHE_ALGORITHM_VERSION}}, f)
 
             with patch("backtest.experiment.precompute_walk_forward_probs") as mock_precompute:
                 prob_map, feature_df, resolved_path = resolve_prob_cache(
@@ -293,3 +319,124 @@ class TestResolvePreCache:
         mock_precompute.assert_called_once()
         assert prob_map == {"built": True}
         assert os.path.exists(resolved_path)
+
+    def _cache_key_for(self, cfg, fingerprint, bar_stream=None, algorithm_version=None):
+        return _compute_cache_key(
+            label_horizon=MLSignalGenerator.LABEL_HORIZON_BARS,
+            label_min_return=MLSignalGenerator.LABEL_MIN_RETURN,
+            min_train_days=cfg.min_train_days,
+            walk_forward_months=cfg.walk_forward_months,
+            train_window_days=cfg.train_window_days,
+            symbols=cfg.symbols,
+            fingerprint=fingerprint,
+            algorithm_version=algorithm_version,
+            bar_stream=bar_stream,
+        )
+
+    def test_legacy_unversioned_cache_at_old_key_path_is_never_loaded(self, tmp_path, monkeypatch):
+        """A cache file sitting at the pre-fix (no algorithm_version/
+        bar_stream) key's path must never be loaded — it may predate the
+        sparse-label-leak fix. Its raw content ("stale_pre_fix_data") must
+        never surface as the result."""
+        monkeypatch.chdir(tmp_path)
+        cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
+        fingerprint = {"BTCUSDT": (1, "t")}
+        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars_by_symbol = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
+
+        legacy_key = self._cache_key_for(cfg, fingerprint)  # no algorithm_version/bar_stream
+        legacy_path = _cache_path_for_key(legacy_key)
+        os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+        with open(legacy_path, "wb") as f:
+            pickle.dump({"prob_map": {"stale_pre_fix_data": True},
+                         "feature_df": self._feature_df()}, f)
+
+        with patch("backtest.experiment._feature_fingerprint", return_value=fingerprint), \
+             patch("backtest.experiment._load_all_features", return_value=self._feature_df()), \
+             patch("backtest.experiment._build_cache_meta", return_value={"cache_key": "n/a"}), \
+             patch("backtest.experiment.precompute_walk_forward_probs",
+                   return_value={"rebuilt": True}) as mock_precompute:
+            prob_map, feature_df, resolved_path = resolve_prob_cache(
+                MagicMock(), cfg, bars_by_symbol,
+            )
+
+        mock_precompute.assert_called_once()
+        assert prob_map == {"rebuilt": True}
+        assert resolved_path != legacy_path
+
+    def test_stale_meta_at_matching_path_is_not_reused(self, tmp_path, monkeypatch):
+        """Defense in depth: even if a file exists exactly at the expected
+        versioned path, a cache_key mismatch in its own stored meta must
+        still trigger a rebuild rather than trusting the path alone."""
+        monkeypatch.chdir(tmp_path)
+        cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
+        fingerprint = {"BTCUSDT": (1, "t")}
+        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bar_stream = [(ts, "BTCUSDT")]
+        bars_by_symbol = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
+
+        key = self._cache_key_for(cfg, fingerprint, bar_stream, PROB_CACHE_ALGORITHM_VERSION)
+        cache_path = _cache_path_for_key(key)
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "wb") as f:
+            pickle.dump({"prob_map": {"stale": True}, "feature_df": self._feature_df(),
+                         "meta": {"cache_key": "not" + key[3:],
+                                  "algorithm_version": PROB_CACHE_ALGORITHM_VERSION}}, f)
+
+        with patch("backtest.experiment._feature_fingerprint", return_value=fingerprint), \
+             patch("backtest.experiment._load_all_features", return_value=self._feature_df()), \
+             patch("backtest.experiment._build_cache_meta", return_value={"cache_key": "n/a"}), \
+             patch("backtest.experiment.precompute_walk_forward_probs",
+                   return_value={"rebuilt": True}) as mock_precompute:
+            prob_map, feature_df, resolved_path = resolve_prob_cache(
+                MagicMock(), cfg, bars_by_symbol,
+            )
+
+        mock_precompute.assert_called_once()
+        assert prob_map == {"rebuilt": True}
+
+    def test_changing_bar_stream_changes_cache_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
+        fingerprint = {"BTCUSDT": (1, "t")}
+        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars_a = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
+        bars_b = {"BTCUSDT": [
+            OHLCVBar(timestamp=ts - timedelta(hours=1), open=1, high=1, low=1, close=1),
+            OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1),
+        ]}
+
+        with patch("backtest.experiment._feature_fingerprint", return_value=fingerprint), \
+             patch("backtest.experiment._load_all_features", return_value=self._feature_df()), \
+             patch("backtest.experiment._build_cache_meta", return_value={"cache_key": "n/a"}), \
+             patch("backtest.experiment.precompute_walk_forward_probs", return_value={"built": True}):
+            _, _, path_a = resolve_prob_cache(MagicMock(), cfg, bars_a)
+            _, _, path_b = resolve_prob_cache(MagicMock(), cfg, bars_b)
+
+        assert path_a != path_b
+
+    def test_matching_versioned_cache_is_reused(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
+        fingerprint = {"BTCUSDT": (1, "t")}
+        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bar_stream = [(ts, "BTCUSDT")]
+        bars_by_symbol = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
+
+        key = self._cache_key_for(cfg, fingerprint, bar_stream, PROB_CACHE_ALGORITHM_VERSION)
+        cache_path = _cache_path_for_key(key)
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "wb") as f:
+            pickle.dump({"prob_map": {"cached": True}, "feature_df": self._feature_df(),
+                         "meta": {"cache_key": key,
+                                  "algorithm_version": PROB_CACHE_ALGORITHM_VERSION}}, f)
+
+        with patch("backtest.experiment._feature_fingerprint", return_value=fingerprint), \
+             patch("backtest.experiment.precompute_walk_forward_probs") as mock_precompute:
+            prob_map, feature_df, resolved_path = resolve_prob_cache(
+                MagicMock(), cfg, bars_by_symbol,
+            )
+
+        mock_precompute.assert_not_called()
+        assert prob_map == {"cached": True}
+        assert resolved_path == cache_path

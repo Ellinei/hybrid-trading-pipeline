@@ -199,8 +199,7 @@ class TestReplayAggregatorRegimeGate:
 
         assert result.direction == SignalDirection.BUY
 
-    def test_missing_date_in_regime_dict_defaults_to_allowing_buy(self):
-        from signals.regime import RegimeState
+    def test_missing_date_in_enabled_regime_dict_blocks_buy(self):
 
         df = self._buy_signal_df()
         regime = {}  # no entry for this date at all
@@ -208,7 +207,8 @@ class TestReplayAggregatorRegimeGate:
 
         result = agg.aggregate("BTCUSDT", as_of=_START)
 
-        assert result.direction == SignalDirection.BUY
+        assert result.direction == SignalDirection.HOLD
+        assert "classification_unavailable" in result.reasoning
 
     def test_never_blocks_a_sell(self):
         from signals.regime import RegimeState

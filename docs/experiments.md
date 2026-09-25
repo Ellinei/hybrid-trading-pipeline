@@ -1,5 +1,26 @@
 # Experiment Ledger
 
+## September 2026 correctness review
+
+The historical exp008 acceptance claim below is preserved as an experiment
+record, but is **not current validation**. Review found that the regime replay
+used the final BTC close from the same UTC day for earlier intraday entries.
+The corrected implementation uses only the prior completed day and blocks
+entries when required history/classification is unavailable.
+
+The first correction-only diagnostic, `results/exp008_causal_20260923`, scored
+`[2023-07-05T00:00:00Z, 2026-01-01T00:00:00Z)` with the original strategy knobs:
+95 trades, PF 1.1810, maximum drawdown 3.9335%. It **does not pass** the original
+Phase 12 thresholds of approximately PF 1.45 and at least 100 trades. This
+comparison includes the stricter 200-complete-day warm-up rule, not just the
+one-day timing shift. A subsequent review also found a sparse-data label-timing
+issue and missing cache-version inputs; final corrected results must use those
+fixes too. No parameters were retuned against these outcomes.
+
+See [implementation progress](../log/phase13-implementation-progress.md) for
+current checks and [the forward protocol](forward-trial.md) for the registered
+future interval. January 2026 remains an already-inspected regression interval.
+
 Canonical run (the only numbers that count):
 
 ```

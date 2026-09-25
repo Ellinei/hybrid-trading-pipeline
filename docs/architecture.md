@@ -4,51 +4,28 @@
 
 ```mermaid
 flowchart TB
-    subgraph Ingestion["Ingestion Layer"]
-        BA["Binance API\nWebSocket + REST"]
-        RD["Reddit API\n(Phase 4)"]
-    end
-
-    subgraph Streaming["Streaming Layer (Redpanda/Kafka)"]
-        K1["raw.trades"]
-        K2["raw.orderbook"]
-        K3["raw.sentiment\n(Phase 4)"]
-    end
-
-    subgraph Storage["TimescaleDB (PostgreSQL 15)"]
-        RAW["raw schema\nTick data"]
-        STG["staging schema\nCleaned + validated"]
-        FEAT["features schema\nEngineered features"]
-        TRD["trading schema\nSignals + orders"]
-    end
-
-    subgraph Batch["Batch Layer"]
-        AF["Airflow DAGs\nOrchestration"]
-        DBT["dbt Models\nTestable SQL transforms"]
-    end
-
-    subgraph Signals["Signal Engine"]
-        TA["Technical Analysis\npandas-ta"]
-        ML["XGBoost Model\nPrice direction"]
-        SENT["FinBERT\nSentiment (Phase 4)"]
-        FUSE["Multi-Signal Fusion\nWeighted ensemble"]
-    end
-
-    subgraph Execution["Execution Layer"]
-        RM["Risk Manager\nPosition sizing, stops"]
-        OE["Order Executor\nBinance API"]
-    end
-
-    MON["Streamlit Dashboard\nP&L, signals, positions"]
-
-    BA -->|websocket stream| K1 & K2
-    RD -->|posts + comments| K3
-    K1 & K2 & K3 --> RAW
-    RAW --> AF --> DBT --> STG --> FEAT
-    FEAT --> TA & ML & SENT
-    TA & ML & SENT --> FUSE
-    FUSE --> RM --> OE --> TRD
-    FEAT & TRD --> MON
+    REST["Binance mainnet completed candles"] --> RAW["TimescaleDB raw.ohlcv"]
+    AF["Hourly Airflow refresh"] --> REST
+    RAW --> DBT["dbt staging, returns, features and tests"]
+    DBT --> FEAT["features.feat_technical"]
+    FEAT --> TA["Technical rules"]
+    FEAT --> ML["XGBoost: 8-bar return hurdle"]
+    TA & ML --> FUSE["Weighted signal fusion"]
+    RSS["Optional VADER RSS sentiment\nDisabled for adopted strategy"] -.-> FUSE
+    RAW --> REGIME["Prior completed UTC day BTC regime"]
+    FUSE --> GUARD["Regime, freshness and validation gates"]
+    REGIME --> GUARD
+    GUARD --> RISK["Sizing, exposure and drawdown limits"]
+    RISK --> PAPER["Persistent SQLite paper account"]
+    RISK --> EXCHANGE["Configured Binance order execution"]
+    WS["Binance WebSocket trades"] --> KAFKA["Redpanda"]
+    KAFKA --> STREAM["Rolling streaming snapshots"]
+    STREAM --> MON["Streamlit operations and experiments"]
+    PAPER & EXCHANGE --> MON
+    FEAT --> WF["Walk-forward training and historical replay"]
+    REGIME --> WF
+    WF --> ARTIFACTS["Metrics, trades, configuration and report"]
+    ARTIFACTS --> MON
 ```
 
 ## Design Decisions
@@ -77,7 +54,10 @@ Cron runs jobs in isolation with no dependency management, retry logic, or obser
 | Monitoring | Streamlit dashboard (polling) | Grafana + Prometheus + Alertmanager |
 | TLS/Auth | None between services | mTLS on Kafka, Airflow behind auth proxy |
 
-These gaps are intentional for Phase 1. The scaffold is designed so each can be addressed incrementally without restructuring the codebase.
+This remains a research and paper-trading deployment. Historical results do not
+establish forward profitability. Streaming snapshots are informational for the
+current strategy; batch feature timestamps and validation status govern entry
+readiness. Exit processing continues when entry guards block new positions.
 
 Local Development Notes
 Windows: PostgreSQL Port Conflict

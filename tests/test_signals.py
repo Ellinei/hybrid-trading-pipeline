@@ -565,6 +565,9 @@ class TestMLSignal:
             columns=MLSignalGenerator.FEATURES,
         )
         df["target"] = (rng.random(200) > 0.5).astype(int)
+        df["symbol"] = "BTCUSDT"
+        df["timestamp"] = pd.date_range("2026-01-01", periods=200, freq="h", tz="UTC")
+        df["label_timestamp"] = pd.date_range("2026-01-01 08:00", periods=200, freq="h", tz="UTC")
 
         with patch.object(MLSignalGenerator, "load_training_data", return_value=df):
             gen.train(["BTCUSDT"])

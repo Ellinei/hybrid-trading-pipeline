@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import pytest
 
 from backtest.run_backtest import (
+    PROB_CACHE_ALGORITHM_VERSION,
     _compute_cache_key,
     _feature_fingerprint,
     _load_atr,
@@ -91,13 +91,13 @@ class TestFeatureFingerprint:
         engine = MagicMock()
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
-        conn.execute.return_value.fetchone.return_value = (26280, "2026-07-04T00:00:00+00:00")
+        conn.execute.return_value.fetchone.return_value = (26280, "2026-07-04T00:00:00+00:00", "digest")
 
         result = _feature_fingerprint(engine, ["BTCUSDT", "ETHUSDT"])
 
         assert result == {
-            "BTCUSDT": (26280, "2026-07-04T00:00:00+00:00"),
-            "ETHUSDT": (26280, "2026-07-04T00:00:00+00:00"),
+            "BTCUSDT": (26280, "2026-07-04T00:00:00+00:00", "digest"),
+            "ETHUSDT": (26280, "2026-07-04T00:00:00+00:00", "digest"),
         }
         assert conn.execute.call_count == 2
         sql = str(conn.execute.call_args_list[0][0][0])
@@ -108,11 +108,11 @@ class TestFeatureFingerprint:
         engine = MagicMock()
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
-        conn.execute.return_value.fetchone.return_value = (0, None)
+        conn.execute.return_value.fetchone.return_value = (0, None, "empty")
 
         result = _feature_fingerprint(engine, ["BTCUSDT"])
 
-        assert result == {"BTCUSDT": (0, None)}
+        assert result == {"BTCUSDT": (0, None, "empty")}
 
 
 class TestLoadBars:
@@ -189,34 +189,90 @@ class TestLoadAtr:
 
 
 class TestValidateCacheKey:
+    """Intentional tightening (Phase 13 review fix): a cache with no
+    cache_key, no algorithm_version, or a stale algorithm_version used to
+    proceed with only a soft warning — that let legacy pre-fix caches
+    (built before the label-availability and causal-CV fixes) silently
+    produce results that look like a fresh, correct run. All three cases
+    are now hard refusals unless --force is passed."""
 
-    def test_matching_key_proceeds_silently(self):
+    def test_matching_key_and_current_version_proceeds_silently(self):
         ok, message = _validate_cache_key(
-            meta={"cache_key": "abc123"}, expected_key="abc123", force=False,
+            meta={"cache_key": "abc123", "algorithm_version": PROB_CACHE_ALGORITHM_VERSION},
+            expected_key="abc123", force=False,
         )
         assert ok is True
         assert message == ""
 
-    def test_legacy_cache_without_key_proceeds_with_warning(self):
-        """Caches built before this mechanism existed have no cache_key —
-        must not hard-fail on them, or every already-built cache (including
-        the golden-parity baseline) breaks."""
+    def test_no_cache_key_is_refused(self):
+        """A cache built before the content-key mechanism existed has no
+        cache_key at all — this now hard-fails instead of warning-and-
+        proceeding."""
         ok, message = _validate_cache_key(
             meta={}, expected_key="abc123", force=False,
         )
+        assert ok is False
+        assert "no content key" in message.lower()
+
+    def test_no_cache_key_with_force_proceeds_with_warning(self):
+        ok, message = _validate_cache_key(
+            meta={}, expected_key="abc123", force=True,
+        )
         assert ok is True
-        assert "legacy" in message.lower() or "no content key" in message.lower()
+        assert "no content key" in message.lower()
+        assert "not comparable" in message.lower()
+
+    def test_key_without_algorithm_version_is_refused(self):
+        """A cache with a cache_key but no algorithm_version predates the
+        label-availability and CV fixes even though it has a content key —
+        must not be silently trusted just because the key happens to
+        recompute to a match."""
+        ok, message = _validate_cache_key(
+            meta={"cache_key": "abc123"}, expected_key="abc123", force=False,
+        )
+        assert ok is False
+        assert "algorithm_version" in message.lower()
+
+    def test_key_without_algorithm_version_with_force_proceeds_with_warning(self):
+        ok, message = _validate_cache_key(
+            meta={"cache_key": "abc123"}, expected_key="abc123", force=True,
+        )
+        assert ok is True
+        assert "algorithm_version" in message.lower()
+        assert "not comparable" in message.lower()
+
+    def test_old_algorithm_version_is_refused(self):
+        """A cache built under a since-superseded algorithm version (e.g.
+        v2, before the causal-CV fix) must be refused even if its content
+        key otherwise matches."""
+        ok, message = _validate_cache_key(
+            meta={"cache_key": "abc123", "algorithm_version": PROB_CACHE_ALGORITHM_VERSION - 1},
+            expected_key="abc123", force=False,
+        )
+        assert ok is False
+        assert "algorithm_version mismatch" in message.lower()
+
+    def test_old_algorithm_version_with_force_proceeds_with_warning(self):
+        ok, message = _validate_cache_key(
+            meta={"cache_key": "abc123", "algorithm_version": PROB_CACHE_ALGORITHM_VERSION - 1},
+            expected_key="abc123", force=True,
+        )
+        assert ok is True
+        assert "algorithm_version mismatch" in message.lower()
+        assert "not comparable" in message.lower()
 
     def test_mismatched_key_without_force_blocks(self):
         ok, message = _validate_cache_key(
-            meta={"cache_key": "abc123"}, expected_key="different", force=False,
+            meta={"cache_key": "abc123", "algorithm_version": PROB_CACHE_ALGORITHM_VERSION},
+            expected_key="different", force=False,
         )
         assert ok is False
-        assert "mismatch" in message.lower()
+        assert "key mismatch" in message.lower()
 
     def test_mismatched_key_with_force_proceeds_with_warning(self):
         ok, message = _validate_cache_key(
-            meta={"cache_key": "abc123"}, expected_key="different", force=True,
+            meta={"cache_key": "abc123", "algorithm_version": PROB_CACHE_ALGORITHM_VERSION},
+            expected_key="different", force=True,
         )
         assert ok is True
-        assert "mismatch" in message.lower()
+        assert "key mismatch" in message.lower()
