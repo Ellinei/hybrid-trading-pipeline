@@ -142,3 +142,46 @@ and must not be read as validation.
   process (see `results/forward_20260924/bot.pid`), logging to
   `results/forward_20260924/bot.log`. The machine and Docker Desktop must
   stay up for the 7-day observation. Report any downtime as heartbeat gaps.
+
+## Amendment — 2026-09-25: intermittent operation on a PC
+
+**Why:** the host PC cannot stay on for seven consecutive days. The user made
+this decision about three hours after activation, with 0 trades and no
+performance observed, so it was not made after seeing any outcome.
+
+**Operation:** each session starts with `scripts\trial_start.ps1` and ends
+with `scripts\trial_stop.ps1`. The start script brings up Postgres and the
+Airflow scheduler and runs one catch-up refresh, which backfills every candle
+missed while the PC was off. It then launches the bot detached, on the same
+account. It never creates a new account and never starts a second bot. The
+stop script waits for the current cycle to finish, then stops the bot and the
+services. Sessions are logged in `results/forward_20260924/sessions.log`, and
+`scripts\trial_status.ps1` reports status (read-only).
+
+**Operational acceptance** replaces "seven consecutive days" with:
+- at least **168 distinct UTC hours with a heartbeat** since activation,
+  spread over at least 7 calendar days (`scripts/trial_report.py` counts
+  them);
+- at least one UTC midnight rollover while running;
+- at least one restart in which the account resumes (done: see below);
+- one deliberate stale-data test: pause `ohlcv_feature_refresh` for more than
+  3 hours while the bot runs, confirm that BUYs are blocked while SELLs and
+  exits continue, then unpause and confirm that entries recover;
+- every downtime gap reported with its duration.
+
+**Consequences:** no decisions are made while the PC is off, and missed hours
+are not reconstructed. Open paper positions are not monitored during
+downtime. Their time stops and price stops are evaluated in the first cycle
+after restart, at the quote current then, so exits can be later and outcomes
+worse than in continuous operation. Any trade that spans a downtime gap must
+be flagged in the report. The performance sample shrinks in proportion to
+downtime; below 30 trades the performance verdict stays inconclusive.
+
+**Evidence so far:** two restarts on 2026-09-25 (bot down 15:28–15:44 and
+15:45–15:47 UTC). In both, the account and journal resumed, the gates were
+evaluated, and there were 0 errors. The first test run of
+`trial_start.ps1` exposed a silent failure: the refresh trigger's output was
+discarded, and its first attempt, made right after the scheduler started,
+never registered, so the script waited out its timeout. That run's bot still
+started on published data. The script now retries the trigger until the run
+is registered and prints the error otherwise; the second test passed.
