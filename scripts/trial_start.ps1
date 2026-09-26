@@ -4,9 +4,11 @@
 .DESCRIPTION
     Starts Docker Desktop if needed, brings up Postgres and the Airflow
     scheduler, and runs one data refresh so the bot starts on current
-    candles. Then it launches the bot detached, so closing this window does
-    not stop it. The same paper account resumes; this script never creates
-    a new one. Re-running is safe: it will not start a second bot.
+    candles. Then it launches the bot detached and windowless: closing this
+    window does not stop it, and the bot has no window of its own to close.
+    Only scripts\trial_stop.ps1 stops it. The same paper account resumes;
+    this script never creates a new one. Re-running is safe: it will not
+    start a second bot.
 .EXAMPLE
     pwsh -File scripts\trial_start.ps1
 #>
@@ -96,10 +98,16 @@ if ($state -eq 'success') {
 Invoke-Psql 'SELECT symbol, max(timestamp) FROM raw.ohlcv GROUP BY symbol ORDER BY symbol;'
 Invoke-Psql 'SELECT symbol, is_valid, feature_timestamp FROM raw.feature_validation ORDER BY symbol;'
 
-# 4. Bot, detached through WMI so it is not a child of this window.
+# 4. Bot, detached through WMI so it is not a child of this window, and with
+#    its console hidden. A visible console opens as a blank Windows Terminal
+#    window titled cmd.exe (output goes to bot.log), and closing that window
+#    kills the bot without a log line.
 $logSizeBefore = if (Test-Path $BotLog) { (Get-Item $BotLog).Length } else { 0 }
 $cmd = "cmd.exe /c `"cd /d `"$Repo`" && set BOT_OPERATIONS_DB=$TrialDb&& set PYTHONIOENCODING=utf-8&& .venv\Scripts\python.exe -u -m cli trade --paper --interval 3600 >> `"$BotLog`" 2>&1`""
-$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $Repo }
+$hidden = New-CimInstance -Namespace root/cimv2 -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = $cmd; CurrentDirectory = $Repo; ProcessStartupInformation = [ciminstance]$hidden
+}
 if ($result.ReturnValue -ne 0) { Write-Step "Launching the bot failed (WMI code $($result.ReturnValue))."; exit 1 }
 $started = Get-UtcStamp
 @(
