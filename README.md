@@ -2,7 +2,7 @@
 
 **Hybrid streaming + batch research pipeline for crypto strategy evaluation and paper trading on Binance market data.**
 
-![Build](https://img.shields.io/badge/build-passing-brightgreen)
+[![CI](https://github.com/Ellinei/hybrid-trading-pipeline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Ellinei/hybrid-trading-pipeline/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.13-blue)
 See the latest verification record in [the implementation log](log/phase13-implementation-progress.md).
@@ -39,8 +39,8 @@ Execution supports Binance entries and protective **OCO (One-Cancels-Other) orde
 ## Quick Start
 
 ```bash
-git clone https://github.com/Ellinei/hybrid_pipeline.git
-cd hybrid_pipeline
+git clone https://github.com/Ellinei/hybrid-trading-pipeline.git
+cd hybrid-trading-pipeline
 
 # 1. Configure environment
 cp .env.example .env      # fill in your Binance testnet API keys
@@ -144,7 +144,7 @@ hybrid-trading-pipeline/
 │   ├── models/
 │   │   ├── staging/            # stg_ohlcv (view)
 │   │   ├── intermediate/       # int_returns (view) — log returns, pct changes
-│   │   └── features/           # feat_technical (table) — 25 ML features
+│   │   └── features/           # feat_technical (table): 25 columns, 18 used by the model
 │   ├── tests/
 │   └── README.md
 ├── signals/                    # Multi-signal fusion engine
