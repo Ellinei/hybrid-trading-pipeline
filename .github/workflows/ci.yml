@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite takes about 2 minutes. The cap turns a stuck parallel
+    # GridSearchCV fit into a fast failure instead of a 6 hour hang.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Poetry is installed before setup-python so its dependency cache works.
+      # Pinned to the 2.x line that wrote poetry.lock.
+      - name: Install Poetry
+        run: pipx install poetry==2.3.4
+
+      - name: Set up Python 3.11
+        id: setup-python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: poetry
+
+      - name: Install dependencies
+        run: |
+          poetry env use "${{ steps.setup-python.outputs.python-path }}"
+          poetry install --no-interaction
+
+      # Runs the ruff version pinned in poetry.lock, so CI and local agree.
+      - name: Lint
+        run: poetry run ruff check .
+
+      # The golden parity test (marker "golden") is deselected here. It replays
+      # exp007 against a populated TimescaleDB and compares the result to two
+      # untracked fixtures, cache/wf_540d_h8.pkl and
+      # results/golden/trades_exp007_golden.csv. Neither fixture is in the
+      # repository, so an empty database service container could not run it
+      # either. Run it locally with: poetry run pytest -m golden
+      # Every other test mocks its database and network access.
+      #
+      # pytest addopts also write an HTML coverage report to htmlcov/. It stays
+      # on the runner and needs no upload.
+      - name: Test
+        run: poetry run pytest -q -m "not golden"
