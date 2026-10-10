@@ -6,7 +6,7 @@ Usage:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 from dotenv import load_dotenv
@@ -85,7 +85,7 @@ class SignalAggregator:
     # ------------------------------------------------------------------
 
     def aggregate(self, symbol: str, as_of: datetime | None = None) -> AggregatedSignal:
-        now     = as_of if as_of is not None else datetime.now(timezone.utc)
+        now     = as_of if as_of is not None else datetime.now(UTC)
         signals: list[Signal] = []
 
         # Live sentiment has no historical archive — when replaying a past
@@ -134,7 +134,9 @@ class SignalAggregator:
         # Regime state is recorded for every decision, including SELL and HOLD.
         # An enabled but unavailable classification blocks only new BUYs.
         regime = getattr(self, "_regime", None)
-        decision = regime_decision(regime, utc_date(now), getattr(self, "_regime_refresh_error", None))
+        decision = regime_decision(
+            regime, utc_date(now), getattr(self, "_regime_refresh_error", None),
+        )
         entry_blocked = direction == SignalDirection.BUY and decision.blocking_reason is not None
         if entry_blocked:
             direction = SignalDirection.HOLD
@@ -143,7 +145,8 @@ class SignalAggregator:
                 direction=SignalDirection.HOLD, confidence=0.0,
                 source="regime", symbol=symbol, timestamp=now,
                 metadata={"state": decision.state.value if decision.state else None,
-                          "source_date": decision.source_date.isoformat() if decision.source_date else None,
+                          "source_date": (decision.source_date.isoformat()
+                                          if decision.source_date else None),
                           "blocking_reason": decision.blocking_reason,
                           "entry_blocked": entry_blocked},
             ))
@@ -164,7 +167,8 @@ class SignalAggregator:
                 prob = m.get("probability_up")
                 hint = f"prob_up={prob:.2f}" if prob is not None else "no_model"
             else:  # sentiment
-                hint = f"score={m.get('sentiment_score', 0.0):.2f} articles={m.get('article_count', 0)}"
+                hint = (f"score={m.get('sentiment_score', 0.0):.2f} "
+                        f"articles={m.get('article_count', 0)}")
             parts.append(f"{name}: {s.direction.value}({s.confidence:.2f}) {hint}".strip())
 
         reasoning = (

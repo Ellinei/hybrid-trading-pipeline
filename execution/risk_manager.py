@@ -27,7 +27,8 @@ class RiskConfig:
     max_drawdown_pct:      float = 0.10   # 10 % circuit-breaker
     min_confidence:        float = 0.55
     max_hold_bars:         int   = 0      # close after N hourly bars (0 = disabled)
-    max_portfolio_risk_pct: float | None = None  # cap on sum(entry-stop)*qty across open positions; None = disabled
+    # cap on sum(entry-stop)*qty across open positions; None = disabled
+    max_portfolio_risk_pct: float | None = None
 
 
 class RiskManager:

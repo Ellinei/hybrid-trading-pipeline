@@ -18,7 +18,7 @@ from __future__ import annotations
 import enum
 import math
 from dataclasses import dataclass
-from datetime import date, timedelta, timezone
+from datetime import UTC, date, timedelta
 
 from backtest.exit_simulation import OHLCVBar
 
@@ -63,7 +63,7 @@ def compute_regime_r1_sma200(daily_close: list[tuple[date, float]]) -> dict[date
     sma200 = _sma(closes, 200)
     return {
         d: RegimeState.RISK_ON if sma is None or close > sma else RegimeState.RISK_OFF
-        for d, close, sma in zip(dates, closes, sma200)
+        for d, close, sma in zip(dates, closes, sma200, strict=False)
     }
 
 
@@ -83,7 +83,7 @@ def compute_regime_r2_hysteresis_cross(
 
     regime: dict[date, RegimeState] = {}
     state = RegimeState.RISK_ON
-    for d, s50, s200 in zip(dates, sma50, sma200):
+    for d, s50, s200 in zip(dates, sma50, sma200, strict=False):
         if s50 is None or s200 is None:
             regime[d] = state
             continue
@@ -121,7 +121,7 @@ def compute_regime_r3_vol_percentile(
 
     regime: dict[date, RegimeState] = {}
     vol_history: list[float] = []
-    for d, v in zip(dates, vol):
+    for d, v in zip(dates, vol, strict=False):
         if v is None:
             regime[d] = RegimeState.RISK_ON
             continue
@@ -190,8 +190,8 @@ def utc_date(ts):
     tzinfo but are UTC by construction) rather than being interpreted as
     local time, which .astimezone() would otherwise silently do."""
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(timezone.utc).date()
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC).date()
 
 
 def build_causal_regime(
@@ -205,7 +205,9 @@ def build_causal_regime(
     emitted until the candidate's full history is available again.
     """
     if candidate not in REGIME_FUNCTIONS:
-        raise ValueError(f"Unknown regime candidate: {candidate!r}. Choices: {sorted(REGIME_FUNCTIONS)}")
+        raise ValueError(
+            f"Unknown regime candidate: {candidate!r}. Choices: {sorted(REGIME_FUNCTIONS)}"
+        )
     required_days = {"r1_sma200": 200, "r2_hysteresis_cross": 200,
                      "r3_vol_percentile": 60, "r4_composite": 200}[candidate]
     daily_hours: dict[date, dict[int, float]] = {}
@@ -213,10 +215,11 @@ def build_causal_regime(
     for bar in bars:
         ts = bar.timestamp
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        ts = ts.astimezone(timezone.utc)
+            ts = ts.replace(tzinfo=UTC)
+        ts = ts.astimezone(UTC)
         day = utc_date(ts)
-        if ts.minute or ts.second or ts.microsecond or not math.isfinite(bar.close) or bar.close <= 0:
+        if (ts.minute or ts.second or ts.microsecond
+                or not math.isfinite(bar.close) or bar.close <= 0):
             invalid_days.add(day)
             continue
         hours = daily_hours.setdefault(day, {})

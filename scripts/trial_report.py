@@ -79,12 +79,12 @@ def _heartbeats() -> None:
     print(f"Hours evaluated since activation: {hours} / {TARGET_HOURS} target "
           f"({100 * hours / TARGET_HOURS:.0f}%); {len(rows)} cycles, "
           f"cycle errors {sum(r[1] for r in rows)}")
-    minutes_ago = since_last.total_seconds() / 60
-    print(f"Last heartbeat: {stamps[-1]:%Y-%m-%d %H:%M} UTC ({minutes_ago:.0f} min ago)")
+    print(f"Last heartbeat: {stamps[-1]:%Y-%m-%d %H:%M} UTC "
+          f"({since_last.total_seconds() / 60:.0f} min ago)")
     print(f"Downtime gaps (> {GAP_THRESHOLD.seconds // 60} min): {len(gaps)}")
     for a, b in gaps[-10:]:
-        hours = (b - a).total_seconds() / 3600
-        print(f"  {a:%Y-%m-%d %H:%M} -> {b:%Y-%m-%d %H:%M} UTC ({hours:.1f} h)")
+        print(f"  {a:%Y-%m-%d %H:%M} -> {b:%Y-%m-%d %H:%M} UTC "
+              f"({(b - a).total_seconds() / 3600:.1f} h)")
 
 
 def main() -> int:

@@ -10,9 +10,10 @@ circuit breaker.
 """
 from __future__ import annotations
 
-import structlog
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+
+import structlog
 
 from backtest.exit_simulation import (
     OHLCVBar,
@@ -23,7 +24,12 @@ from backtest.exit_simulation import (
 from backtest.metrics import max_drawdown, profit_factor, sharpe_ratio, total_return, win_rate
 from backtest.sim_risk_manager import SimulatedRiskManager
 from backtest.state import BacktestState, OpenPosition
-from execution.exchange_filters import FilterViolation, SymbolFilters, round_qty_down, validate_notional
+from execution.exchange_filters import (
+    FilterViolation,
+    SymbolFilters,
+    round_qty_down,
+    validate_notional,
+)
 from execution.risk_manager import RiskConfig
 from signals.base import SignalDirection
 
@@ -235,8 +241,8 @@ def run_backtest(
                 # The label horizon counts feature rows, which can span more
                 # than horizon clock hours when data has gaps. Check the
                 # actual forward-close timestamp before fitting.
-                from signals.ml_model import MLSignalGenerator
                 from backtest.signal_cache import available_training_rows
+                from signals.ml_model import MLSignalGenerator
                 slice_df = available_training_rows(
                     feature_df, timestamp, MLSignalGenerator.LABEL_HORIZON_BARS,
                     train_window_days,

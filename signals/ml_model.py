@@ -13,13 +13,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
-import pickle
-import sys
 import hashlib
 import json
+import os
+import pickle
 import subprocess
-from datetime import datetime, timedelta, timezone
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -43,7 +43,7 @@ def _parse_aware_utc(value: str) -> datetime:
         raise argparse.ArgumentTypeError("--as-of must be an ISO 8601 datetime") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise argparse.ArgumentTypeError("--as-of must be timezone-aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def parse_train_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -203,10 +203,10 @@ class MLSignalGenerator:
 
     @staticmethod
     def _utc_cutoff(as_of: datetime | None) -> datetime:
-        cutoff = as_of if as_of is not None else datetime.now(timezone.utc)
+        cutoff = as_of if as_of is not None else datetime.now(UTC)
         if cutoff.tzinfo is None or cutoff.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
-        return cutoff.astimezone(timezone.utc)
+        return cutoff.astimezone(UTC)
 
     @staticmethod
     def _time_grouped_purged_cv(
@@ -239,7 +239,9 @@ class MLSignalGenerator:
                 f"{n_splits}-fold CV"
             )
         cv = []
-        for train_group_idx, validation_group_idx in TimeSeriesSplit(n_splits=n_splits).split(times):
+        for train_group_idx, validation_group_idx in (
+            TimeSeriesSplit(n_splits=n_splits).split(times)
+        ):
             validation_start = times[validation_group_idx[0]]
             train_idx = frame.index[
                 frame["timestamp"].isin(times[train_group_idx])
@@ -280,9 +282,13 @@ class MLSignalGenerator:
         # walk-forward frames (_time_grouped_purged_cv), so the two code
         # paths can't drift apart.
         try:
-            train, cv = MLSignalGenerator._time_grouped_purged_cv(train, "label_timestamp", n_splits=5)
+            train, cv = MLSignalGenerator._time_grouped_purged_cv(
+                train, "label_timestamp", n_splits=5,
+            )
         except ValueError as exc:
-            raise ValueError(f"insufficient distinct timestamps after horizon purge ({exc})") from exc
+            raise ValueError(
+                f"insufficient distinct timestamps after horizon purge ({exc})"
+            ) from exc
         return train, holdout, cv
 
     def train(
@@ -373,13 +379,15 @@ class MLSignalGenerator:
             "test_size":  int(len(X_te)),
             "best_params": chosen_params,
             "feature_importance": dict(
-                zip(self.FEATURES, model.feature_importances_.tolist())
+                zip(self.FEATURES, model.feature_importances_.tolist(), strict=False)
             ),
         }
 
         os.makedirs(os.path.dirname(self.MODEL_PATH), exist_ok=True)
-        with open(self.MODEL_PATH,  "wb") as f: pickle.dump(self.model,  f)
-        with open(self.SCALER_PATH, "wb") as f: pickle.dump(self.scaler, f)
+        with open(self.MODEL_PATH, "wb") as f:
+            pickle.dump(self.model, f)
+        with open(self.SCALER_PATH, "wb") as f:
+            pickle.dump(self.scaler, f)
 
         # Hash the canonical ordered training input, including label reveal
         # times, so a changed historical row or target changes the identity.
@@ -453,8 +461,10 @@ class MLSignalGenerator:
             import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore")   # suppress xgboost/sklearn pickle version noise
-                with open(self.MODEL_PATH,  "rb") as f: self.model  = pickle.load(f)
-                with open(self.SCALER_PATH, "rb") as f: self.scaler = pickle.load(f)
+                with open(self.MODEL_PATH, "rb") as f:
+                    self.model = pickle.load(f)
+                with open(self.SCALER_PATH, "rb") as f:
+                    self.scaler = pickle.load(f)
             return True
         except Exception as exc:
             log.warning("model_load_failed", error=str(exc))
@@ -652,7 +662,7 @@ class MLSignalGenerator:
         return trained, frozen_params
 
     def generate_signal(self, symbol: str, as_of: datetime | None = None) -> Signal:
-        now = as_of if as_of is not None else datetime.now(timezone.utc)
+        now = as_of if as_of is not None else datetime.now(UTC)
 
         if self.model is None:
             if getattr(self, "_walk_forward_mode", False):
@@ -702,7 +712,7 @@ class MLSignalGenerator:
             source="ml", symbol=symbol, timestamp=now,
             metadata={
                 "probability_up": prob_up,
-                "features": dict(zip(self.FEATURES, feat_values)),
+                "features": dict(zip(self.FEATURES, feat_values, strict=False)),
             },
         )
 

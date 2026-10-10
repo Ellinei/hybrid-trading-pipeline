@@ -15,7 +15,7 @@ import json
 import os
 import pickle
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -62,7 +62,9 @@ def _load_bars(engine, symbol: str, start: datetime | None, end: datetime | None
     ]
 
 
-def _load_atr(engine, symbol: str, start: datetime | None, end: datetime | None) -> dict[datetime, float]:
+def _load_atr(
+    engine, symbol: str, start: datetime | None, end: datetime | None,
+) -> dict[datetime, float]:
     df = data_store.load_features(engine, symbol)
     if df.empty:
         return {}
@@ -117,7 +119,7 @@ def _compute_cache_key(
             raise ValueError("Versioned probability caches require the training bar stream")
         payload["algorithm_version"] = algorithm_version
         payload["bar_stream"] = [
-            [ts.astimezone(timezone.utc).isoformat(), symbol]
+            [ts.astimezone(UTC).isoformat(), symbol]
             for ts, symbol in sorted(bar_stream)
         ]
     canonical = json.dumps(payload, sort_keys=True, default=str)
@@ -370,11 +372,13 @@ def main() -> None:
                          help="ISO date (default: earliest available data per symbol)")
     parser.add_argument("--end", type=str, default=None,
                          help="ISO date (default: latest available data per symbol)")
-    parser.add_argument("--output", type=str, default=None, help="Optional CSV path for the trade log")
+    parser.add_argument("--output", type=str, default=None,
+                         help="Optional CSV path for the trade log")
     parser.add_argument("--walk-forward", type=int, default=0, metavar="MONTHS",
                          help="Enable walk-forward ML retraining every N months (0=disabled)")
     parser.add_argument("--min-train-days", type=int, default=60,
-                         help="Warm-up days before first model fit in walk-forward mode (default: 60)")
+                         help="Warm-up days before first model fit in walk-forward mode "
+                              "(default: 60)")
     parser.add_argument("--train-window-days", type=int, default=0,
                          help="Cap the walk-forward training window to a sliding N days "
                               "(0=expanding window over all history)")
@@ -403,7 +407,8 @@ def main() -> None:
     parser.add_argument("--prob-stats", action="store_true", default=False,
                          help="Diagnostic mode: precompute walk-forward ML prob_up distributions "
                               "per month and exit without running the full backtest simulation. "
-                              "Use with --walk-forward to match the retraining schedule of a real run.")
+                              "Use with --walk-forward to match the retraining schedule "
+                              "of a real run.")
     parser.add_argument("--save-cache", type=str, default=None, metavar="PATH",
                          help="After the walk-forward run, precompute prob_map+feature_df and "
                               "pickle them to PATH so subsequent sweeps can skip retraining")
@@ -411,8 +416,9 @@ def main() -> None:
                          help="Load precomputed prob_map+feature_df from PATH (no GridSearchCV); "
                               "combine with --bb-guard/--buy-gate/etc. for fast parameter sweeps")
     parser.add_argument("--cache-only", action="store_true", default=False,
-                         help="Precompute and save the walk-forward prob cache (--save-cache required) "
-                              "then exit — skips the full backtest simulation (~15 min vs ~50 min). "
+                         help="Precompute and save the walk-forward prob cache "
+                              "(--save-cache required) then exit — skips the full backtest "
+                              "simulation (~15 min vs ~50 min). "
                               "Use once to build the cache; then sweep variants with --load-cache.")
     parser.add_argument("--force", action="store_true", default=False,
                          help="With --load-cache: proceed even if the cache's content key doesn't "
@@ -435,10 +441,14 @@ def main() -> None:
     symbols = (
         [s.strip() for s in args.symbols.split(",") if s.strip()]
         if args.symbols else
-        [s.strip() for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
+        [
+            s.strip()
+            for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+            if s.strip()
+        ]
     )
-    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc) if args.start else None
-    end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else None
+    start = datetime.fromisoformat(args.start).replace(tzinfo=UTC) if args.start else None
+    end = datetime.fromisoformat(args.end).replace(tzinfo=UTC) if args.end else None
 
     client = BinanceClientWrapper()
     aggregator = SignalAggregator(
@@ -471,8 +481,8 @@ def main() -> None:
 
     config = BacktestConfig(
         symbols=symbols,
-        start=start or datetime(1970, 1, 1, tzinfo=timezone.utc),
-        end=end or datetime.now(timezone.utc),
+        start=start or datetime(1970, 1, 1, tzinfo=UTC),
+        end=end or datetime.now(UTC),
         risk_config=RiskConfig(max_hold_bars=args.max_hold_bars),
     )
 
@@ -480,7 +490,10 @@ def main() -> None:
     min_train_days = args.min_train_days
     feature_df = None
 
-    if (walk_forward > 0 or args.prob_stats or args.save_cache or args.cache_only) and not args.load_cache:
+    if (
+        (walk_forward > 0 or args.prob_stats or args.save_cache or args.cache_only)
+        and not args.load_cache
+    ):
         wf_months = walk_forward if walk_forward > 0 else 1
         print(f"\n  Walk-forward mode: ML retrain every {wf_months} month(s), "
               f"warm-up {min_train_days} day(s)")

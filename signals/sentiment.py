@@ -8,7 +8,7 @@ Add more feed sources by appending to ``RSS_FEEDS`` — no other code changes.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from time import mktime
 from typing import Any
 
@@ -59,7 +59,7 @@ class SentimentSignalGenerator:
         keywords = self.SYMBOL_KEYWORDS.get(
             symbol, [symbol.lower().replace("USDT", "")]
         )
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
         articles: list[dict[str, Any]] = []
 
         for feed_url in self._all_feeds():
@@ -75,7 +75,7 @@ class SentimentSignalGenerator:
                 if published_struct:
                     try:
                         published_dt = datetime.fromtimestamp(
-                            mktime(published_struct), tz=timezone.utc
+                            mktime(published_struct), tz=UTC
                         )
                         if published_dt < cutoff:
                             continue
@@ -121,7 +121,7 @@ class SentimentSignalGenerator:
         """as_of is accepted for interface parity with the other generators
         but ignored — live RSS has no historical archive to query, so this
         always scores current articles regardless of as_of."""
-        now       = datetime.now(timezone.utc)
+        now       = datetime.now(UTC)
         articles  = self.fetch_articles(symbol)
         sentiment = self.score_articles(articles)
 
@@ -156,7 +156,7 @@ class NeutralSentimentSignalGenerator:
     """
 
     def generate_signal(self, symbol: str, as_of: datetime | None = None) -> Signal:
-        now = as_of if as_of is not None else datetime.now(timezone.utc)
+        now = as_of if as_of is not None else datetime.now(UTC)
         return Signal(
             direction=SignalDirection.HOLD, confidence=0.5,
             source="sentiment", symbol=symbol, timestamp=now,

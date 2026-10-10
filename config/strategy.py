@@ -26,7 +26,9 @@ from dataclasses import dataclass, field
 @dataclass
 class StrategyConfig:
     symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
-    weights: dict = field(default_factory=lambda: {"technical": 0.40, "ml": 0.40, "sentiment": 0.20})
+    weights: dict = field(
+        default_factory=lambda: {"technical": 0.40, "ml": 0.40, "sentiment": 0.20},
+    )
     buy_gate: float = 0.15
     sell_gate: float = -0.15
     ml_buy_threshold: float = 0.55

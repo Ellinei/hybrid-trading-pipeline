@@ -168,8 +168,8 @@ def precompute_walk_forward_probs(
                 continue
             X_scaled = ml.scaler.transform(X[valid])
             p = ml.model.predict_proba(X_scaled)[:, 1]
-            keys = [k for k, ok in zip(keys_by_symbol[symbol], valid) if ok]
-            for key, prob in zip(keys, p.tolist()):
+            keys = [k for k, ok in zip(keys_by_symbol[symbol], valid, strict=False) if ok]
+            for key, prob in zip(keys, p.tolist(), strict=False):
                 probs[key] = float(prob)
         pending.clear()
 
@@ -241,10 +241,7 @@ class ReplayAggregator:
 
         # Technical: latest feature row at or before as_of
         idx_list = self._ts_index.get(symbol)
-        if idx_list:
-            i = bisect_right(idx_list, as_of) - 1
-        else:
-            i = -1
+        i = bisect_right(idx_list, as_of) - 1 if idx_list else -1
         if i < 0:
             tech_dir, tech_conf = SignalDirection.HOLD, 0.5
         else:

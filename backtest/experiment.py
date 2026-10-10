@@ -21,7 +21,7 @@ import os
 import pickle
 import subprocess
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from backtest.engine import BacktestConfig, _load_all_features, run_backtest
 from backtest.metrics import (
@@ -86,7 +86,7 @@ class ExperimentConfig:
             if value is not None:
                 if value.tzinfo is None or value.utcoffset() is None:
                     raise ValueError(f"Evaluation {name} must include a UTC offset")
-                setattr(self, name, value.astimezone(timezone.utc))
+                setattr(self, name, value.astimezone(UTC))
         if self.start is not None and self.start >= self.end:
             raise ValueError("Evaluation start must be earlier than end")
 
@@ -172,7 +172,8 @@ def resolve_prob_cache(
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "wb") as f:
         pickle.dump(
-            {"prob_map": prob_map, "feature_df": feature_df, "bar_stream": bar_stream, "meta": meta},
+            {"prob_map": prob_map, "feature_df": feature_df,
+             "bar_stream": bar_stream, "meta": meta},
             f,
         )
     return prob_map, feature_df, cache_path
@@ -212,7 +213,9 @@ def _compute_metrics(result, regime: dict | None = None, replay_days: set | None
         # Kept separately at the pre-fix metric's exact definition (RISK_OFF
         # share of classified days only) so older exp008-era ledger rows
         # stay comparable to new runs.
-        metrics["regime_days_risk_off_pct"] = risk_off / len(classified) * 100 if classified else 0.0
+        metrics["regime_days_risk_off_pct"] = (
+            risk_off / len(classified) * 100 if classified else 0.0
+        )
         metrics["regime_days_unavailable_pct"] = unavailable / total * 100 if total else 0.0
     return metrics
 
@@ -243,7 +246,7 @@ def _build_ledger_row(cfg: ExperimentConfig, metrics: dict, git_sha: str, data_r
     """
     pf = metrics["profit_factor"]
     pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = datetime.now(UTC).strftime("%Y-%m-%d")
     return (
         f"| {cfg.exp_id} | {date_str} | {git_sha} | <!-- config delta vs baseline --> "
         f"| {data_range} | {metrics['trade_count']} | {pf_str} | "
@@ -288,7 +291,7 @@ def _write_artifacts(cfg: ExperimentConfig, result, cache_path: str, regime: dic
     config_dump["evaluation_interval"] = "[start, end) UTC"
     config_dump["git_sha"] = git_sha
     config_dump["cache_path"] = cache_path
-    config_dump["generated_at"] = datetime.now(timezone.utc).isoformat()
+    config_dump["generated_at"] = datetime.now(UTC).isoformat()
     with open(os.path.join(out_dir, "config.json"), "w") as f:
         json.dump(config_dump, f, indent=2)
 
@@ -336,8 +339,8 @@ def run_experiment(engine, cfg: ExperimentConfig) -> dict:
 
     backtest_config = BacktestConfig(
         symbols=cfg.symbols,
-        start=cfg.start or datetime(1970, 1, 1, tzinfo=timezone.utc),
-        end=cfg.end or datetime.now(timezone.utc),
+        start=cfg.start or datetime(1970, 1, 1, tzinfo=UTC),
+        end=cfg.end or datetime.now(UTC),
         risk_config=RiskConfig(max_hold_bars=cfg.max_hold_bars),
     )
     # The engine currently iterates every supplied bar and does not enforce

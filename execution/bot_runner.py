@@ -147,11 +147,13 @@ def run_once(
         if journal is not None:
             risk_config = getattr(getattr(executor, "risk", None), "config", None)
             paper_config = getattr(executor, "config", None)
-            if not journal.record(symbol=symbol, mode=mode, outcome=outcome, reason=reason,
-                                  signal=signal, config=strategy_cfg,
-                                  risk_config=asdict(risk_config) if is_dataclass(risk_config) else None,
-                                  paper_config=asdict(paper_config) if is_dataclass(paper_config) else None,
-                                  **details):
+            if not journal.record(
+                symbol=symbol, mode=mode, outcome=outcome, reason=reason,
+                signal=signal, config=strategy_cfg,
+                risk_config=asdict(risk_config) if is_dataclass(risk_config) else None,
+                paper_config=asdict(paper_config) if is_dataclass(paper_config) else None,
+                **details,
+            ):
                 errors += 1
 
     try:
@@ -197,7 +199,8 @@ def run_once(
             result = executor.execute_signal(signal, dry_run=dry_run)
             if result is not None:
                 actions += 1
-                record(symbol, "executed", result.get("close_reason") or result.get("status", "executed"),
+                record(symbol, "executed",
+                       result.get("close_reason") or result.get("status", "executed"),
                        signal, trade=result, freshness=health)
             else:
                 decision = getattr(executor, "last_decision", {})
@@ -272,8 +275,10 @@ def main(argv=None) -> None:
                         help="Initial USDT for a NEW paper account (existing accounts are resumed)")
     parser.add_argument("--paper-fee", type=float, default=0.001)
     parser.add_argument("--paper-slippage-bps", type=float, default=5.0)
-    parser.add_argument("--candle-max-age", type=int, default=10800, help="Seconds; candle open time")
-    parser.add_argument("--feature-max-age", type=int, default=10800, help="Seconds; feature source time")
+    parser.add_argument("--candle-max-age", type=int, default=10800,
+                        help="Seconds; candle open time")
+    parser.add_argument("--feature-max-age", type=int, default=10800,
+                        help="Seconds; feature source time")
     parser.add_argument(
         "--interval", type=int, default=3600,
         help="Seconds between cycles in loop mode (default: 3600)",
@@ -325,7 +330,9 @@ def main(argv=None) -> None:
         aggregator._regime_refresh_error = regime_refresh_error
         if args.paper:
             paper_store = PaperStore(initial_balance=paper_config.initial_balance)
-            risk = PaperRiskManager(paper_store, engine, RiskConfig(max_hold_bars=strategy_cfg.max_hold_bars))
+            risk = PaperRiskManager(
+                paper_store, engine, RiskConfig(max_hold_bars=strategy_cfg.max_hold_bars),
+            )
             executor = PaperExecutor(client, paper_store, risk, paper_config)
         else:
             risk = build_risk_manager(client, engine, strategy_cfg)

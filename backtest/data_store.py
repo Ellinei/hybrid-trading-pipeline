@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
-from typing import Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 import pandas as pd
 from sqlalchemy import text
@@ -82,7 +82,7 @@ def _load_or_refresh(
     with open(meta_path, "w") as f:
         json.dump(
             {"symbol": symbol, "fingerprint": list(current_fp),
-             "built_at": datetime.now(timezone.utc).isoformat()},
+             "built_at": datetime.now(UTC).isoformat()},
             f,
         )
     return df

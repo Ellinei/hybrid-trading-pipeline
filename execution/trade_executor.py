@@ -13,7 +13,7 @@ OCO first so the manual sell isn't blocked by locked balance.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import text
@@ -411,7 +411,7 @@ class TradeExecutor:
         if max_hold_bars <= 0:
             return []
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_hold_bars)
+        cutoff = datetime.now(UTC) - timedelta(hours=max_hold_bars)
         with self.engine.connect() as conn:
             rows = conn.execute(_SELECT_EXPIRED_OPEN_TRADES, {"cutoff": cutoff}).fetchall()
 
