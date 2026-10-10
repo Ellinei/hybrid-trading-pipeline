@@ -11,7 +11,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -91,7 +91,9 @@ class TestFeatureFingerprint:
         engine = MagicMock()
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
-        conn.execute.return_value.fetchone.return_value = (26280, "2026-07-04T00:00:00+00:00", "digest")
+        conn.execute.return_value.fetchone.return_value = (
+            26280, "2026-07-04T00:00:00+00:00", "digest",
+        )
 
         result = _feature_fingerprint(engine, ["BTCUSDT", "ETHUSDT"])
 
@@ -123,9 +125,9 @@ class TestLoadBars:
     def _ohlcv_df(self):
         return pd.DataFrame({
             "timestamp": [
-                datetime(2026, 1, 1, tzinfo=timezone.utc),
-                datetime(2026, 1, 2, tzinfo=timezone.utc),
-                datetime(2026, 1, 3, tzinfo=timezone.utc),
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 2, tzinfo=UTC),
+                datetime(2026, 1, 3, tzinfo=UTC),
             ],
             "open": [100.0, 101.0, 102.0],
             "high": [101.0, 102.0, 103.0],
@@ -144,8 +146,8 @@ class TestLoadBars:
         with patch("backtest.run_backtest.data_store.load_ohlcv", return_value=self._ohlcv_df()):
             bars = _load_bars(
                 MagicMock(), "BTCUSDT",
-                datetime(2026, 1, 2, tzinfo=timezone.utc),
-                datetime(2026, 1, 2, tzinfo=timezone.utc),
+                datetime(2026, 1, 2, tzinfo=UTC),
+                datetime(2026, 1, 2, tzinfo=UTC),
             )
 
         assert len(bars) == 1
@@ -163,29 +165,31 @@ class TestLoadAtr:
     def _features_df(self):
         return pd.DataFrame({
             "timestamp": [
-                datetime(2026, 1, 1, tzinfo=timezone.utc),
-                datetime(2026, 1, 2, tzinfo=timezone.utc),
-                datetime(2026, 1, 3, tzinfo=timezone.utc),
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 2, tzinfo=UTC),
+                datetime(2026, 1, 3, tzinfo=UTC),
             ],
             "range_14": [1.5, float("nan"), 2.5],
         })
 
     def test_drops_nan_range_14(self):
-        with patch("backtest.run_backtest.data_store.load_features", return_value=self._features_df()):
+        with patch("backtest.run_backtest.data_store.load_features",
+                   return_value=self._features_df()):
             atr = _load_atr(MagicMock(), "BTCUSDT", None, None)
 
         assert len(atr) == 2
-        assert datetime(2026, 1, 2, tzinfo=timezone.utc) not in atr
+        assert datetime(2026, 1, 2, tzinfo=UTC) not in atr
 
     def test_start_end_filter(self):
-        with patch("backtest.run_backtest.data_store.load_features", return_value=self._features_df()):
+        with patch("backtest.run_backtest.data_store.load_features",
+                   return_value=self._features_df()):
             atr = _load_atr(
                 MagicMock(), "BTCUSDT",
-                datetime(2026, 1, 3, tzinfo=timezone.utc),
-                datetime(2026, 1, 3, tzinfo=timezone.utc),
+                datetime(2026, 1, 3, tzinfo=UTC),
+                datetime(2026, 1, 3, tzinfo=UTC),
             )
 
-        assert atr == {datetime(2026, 1, 3, tzinfo=timezone.utc): 2.5}
+        assert atr == {datetime(2026, 1, 3, tzinfo=UTC): 2.5}
 
 
 class TestValidateCacheKey:

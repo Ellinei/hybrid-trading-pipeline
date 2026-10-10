@@ -5,7 +5,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -25,7 +25,7 @@ from backtest.metrics import (
 
 
 def _equity_curve(values):
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     return [(start + timedelta(hours=i), v) for i, v in enumerate(values)]
 
 
@@ -112,7 +112,7 @@ class TestExitReasonBreakdown:
 
 class TestHoldingHoursStats:
     def test_median_mean_p90(self):
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
         trades = [
             {"entry_time": start, "exit_time": start + timedelta(hours=h)}
             for h in (2.0, 4.0, 6.0, 8.0, 20.0)
@@ -128,7 +128,7 @@ class TestHoldingHoursStats:
 
 class TestPerWindowMetrics:
     def test_trades_bucketed_by_entry_time(self):
-        b0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        b0 = datetime(2026, 1, 1, tzinfo=UTC)
         b1 = b0 + timedelta(days=30)
         trades = [
             # warm-up trade — excluded
@@ -149,7 +149,7 @@ class TestPerWindowMetrics:
         assert windows[1]["window_end"] is None
 
     def test_no_boundaries_returns_empty(self):
-        assert per_window_metrics([{"entry_time": datetime.now(timezone.utc), "pnl": 1.0}], []) == []
+        assert per_window_metrics([{"entry_time": datetime.now(UTC), "pnl": 1.0}], []) == []
 
 
 class TestSharpeRatio:

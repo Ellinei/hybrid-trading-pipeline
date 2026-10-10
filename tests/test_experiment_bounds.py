@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -15,8 +15,7 @@ from backtest.experiment import ExperimentConfig, run_experiment
 from backtest.signal_cache import precompute_walk_forward_probs
 from signals.regime import RegimeState
 
-
-UTC = timezone.utc
+UTC = UTC
 
 
 def _at(hour: int) -> datetime:
@@ -56,7 +55,8 @@ def test_replay_is_start_inclusive_end_exclusive_and_warmup_is_preserved(tmp_pat
     with patch("backtest.experiment.BinanceClientWrapper"), \
          patch("backtest.experiment._load_bars", return_value=history), \
          patch("backtest.experiment._load_atr", return_value={}), \
-         patch("backtest.experiment.resolve_prob_cache", return_value=({}, None, "cache.pkl")) as cache, \
+         patch("backtest.experiment.resolve_prob_cache",
+               return_value=({}, None, "cache.pkl")) as cache, \
          patch("backtest.experiment.run_backtest", return_value=_empty_result()) as replay:
         metrics = run_experiment(engine, cfg)
 
@@ -68,8 +68,9 @@ def test_replay_is_start_inclusive_end_exclusive_and_warmup_is_preserved(tmp_pat
     assert replay.call_args.kwargs["config"].end == _at(4)
     assert metrics["trade_count"] == 0
     assert not (tmp_path / "bounded" / "trades.csv").exists()
-    assert json.loads((tmp_path / "bounded" / "config.json").read_text())["start"] == "2026-01-01T02:00:00+00:00"
-    assert json.loads((tmp_path / "bounded" / "config.json").read_text())["end"] == "2026-01-01T04:00:00+00:00"
+    saved = json.loads((tmp_path / "bounded" / "config.json").read_text())
+    assert saved["start"] == "2026-01-01T02:00:00+00:00"
+    assert saved["end"] == "2026-01-01T04:00:00+00:00"
     ledger = (tmp_path / "bounded" / "ledger_row.md").read_text()
     assert "2026-01-01T02:00:00+00:00..2026-01-01T04:00:00+00:00" in ledger
 

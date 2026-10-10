@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -136,7 +136,7 @@ def backfill_symbol(
     """
     bound_log = log.bind(symbol=symbol, interval=interval)
 
-    snapshot = now or datetime.now(timezone.utc)
+    snapshot = now or datetime.now(UTC)
     if snapshot.tzinfo is None or snapshot.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     latest = _get_latest_timestamp(conn, symbol)
@@ -198,7 +198,9 @@ def run_backfill(
 
     from ingestion.binance_client import BinanceClientWrapper
     from ingestion.feature_validation import (
-        build_validation_engine, feature_refresh_lock, mark_features_invalid,
+        build_validation_engine,
+        feature_refresh_lock,
+        mark_features_invalid,
     )
     from ingestion.models import create_all_tables
 

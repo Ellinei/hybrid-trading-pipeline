@@ -15,7 +15,7 @@ import json
 import os
 import pickle
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -45,7 +45,7 @@ class _FakeResult:
 
 
 def _sample_result():
-    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
     trades = [
         {"symbol": "BTCUSDT", "entry_price": 100.0, "exit_price": 105.0,
          "quantity": 1.0, "entry_time": t0, "exit_time": t0, "pnl": 5.0, "reason": "signal_close"},
@@ -212,7 +212,7 @@ class TestResolveRegime:
 
     def _btc_bars(self, n_days=60):
         bars = []
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
         for d in range(n_days):
             bars.append(OHLCVBar(
                 timestamp=start + pd.Timedelta(days=d), open=100.0, high=101.0,
@@ -249,7 +249,7 @@ class TestResolveRegime:
         assert regime is not None
 
     def test_regime_for_intraday_entry_uses_prior_complete_utc_day(self):
-        first = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        first = datetime(2025, 1, 1, tzinfo=UTC)
         bars = [
             OHLCVBar(timestamp=first + timedelta(days=day, hours=hour),
                      open=100.0, high=101.0, low=1.0,
@@ -275,7 +275,7 @@ class TestResolvePreCache:
 
     def _feature_df(self):
         return pd.DataFrame({
-            "symbol": ["BTCUSDT"], "timestamp": [datetime(2026, 1, 1, tzinfo=timezone.utc)],
+            "symbol": ["BTCUSDT"], "timestamp": [datetime(2026, 1, 1, tzinfo=UTC)],
             "close": [100.0], "future_close": [101.0], "target": [0],
         })
 
@@ -284,7 +284,8 @@ class TestResolvePreCache:
         os.makedirs("cache", exist_ok=True)
         cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
 
-        with patch("backtest.experiment._feature_fingerprint", return_value={"BTCUSDT": (1, "t")}), \
+        with patch("backtest.experiment._feature_fingerprint",
+                   return_value={"BTCUSDT": (1, "t")}), \
              patch("backtest.experiment._compute_cache_key", return_value="fixedkey" * 8):
             cache_path = _cache_path_for_key("fixedkey" * 8)
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -306,12 +307,14 @@ class TestResolvePreCache:
         monkeypatch.chdir(tmp_path)
         cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
 
-        with patch("backtest.experiment._feature_fingerprint", return_value={"BTCUSDT": (1, "t")}), \
+        with patch("backtest.experiment._feature_fingerprint",
+                   return_value={"BTCUSDT": (1, "t")}), \
              patch("backtest.experiment._compute_cache_key", return_value="newkey1" * 8), \
              patch("backtest.experiment._load_all_features", return_value=self._feature_df()), \
              patch("backtest.experiment.precompute_walk_forward_probs",
                    return_value={"built": True}) as mock_precompute, \
-             patch("backtest.experiment._build_cache_meta", return_value={"cache_key": "newkey1" * 8}):
+             patch("backtest.experiment._build_cache_meta",
+                   return_value={"cache_key": "newkey1" * 8}):
             prob_map, feature_df, resolved_path = resolve_prob_cache(
                 MagicMock(), cfg, bars_by_symbol={},
             )
@@ -341,7 +344,7 @@ class TestResolvePreCache:
         monkeypatch.chdir(tmp_path)
         cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
         fingerprint = {"BTCUSDT": (1, "t")}
-        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts = datetime(2026, 1, 1, tzinfo=UTC)
         bars_by_symbol = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
 
         legacy_key = self._cache_key_for(cfg, fingerprint)  # no algorithm_version/bar_stream
@@ -371,7 +374,7 @@ class TestResolvePreCache:
         monkeypatch.chdir(tmp_path)
         cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
         fingerprint = {"BTCUSDT": (1, "t")}
-        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts = datetime(2026, 1, 1, tzinfo=UTC)
         bar_stream = [(ts, "BTCUSDT")]
         bars_by_symbol = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
 
@@ -399,7 +402,7 @@ class TestResolvePreCache:
         monkeypatch.chdir(tmp_path)
         cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
         fingerprint = {"BTCUSDT": (1, "t")}
-        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts = datetime(2026, 1, 1, tzinfo=UTC)
         bars_a = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
         bars_b = {"BTCUSDT": [
             OHLCVBar(timestamp=ts - timedelta(hours=1), open=1, high=1, low=1, close=1),
@@ -409,7 +412,8 @@ class TestResolvePreCache:
         with patch("backtest.experiment._feature_fingerprint", return_value=fingerprint), \
              patch("backtest.experiment._load_all_features", return_value=self._feature_df()), \
              patch("backtest.experiment._build_cache_meta", return_value={"cache_key": "n/a"}), \
-             patch("backtest.experiment.precompute_walk_forward_probs", return_value={"built": True}):
+             patch("backtest.experiment.precompute_walk_forward_probs",
+                   return_value={"built": True}):
             _, _, path_a = resolve_prob_cache(MagicMock(), cfg, bars_a)
             _, _, path_b = resolve_prob_cache(MagicMock(), cfg, bars_b)
 
@@ -419,7 +423,7 @@ class TestResolvePreCache:
         monkeypatch.chdir(tmp_path)
         cfg = ExperimentConfig(exp_id="exp999", symbols=["BTCUSDT"])
         fingerprint = {"BTCUSDT": (1, "t")}
-        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts = datetime(2026, 1, 1, tzinfo=UTC)
         bar_stream = [(ts, "BTCUSDT")]
         bars_by_symbol = {"BTCUSDT": [OHLCVBar(timestamp=ts, open=1, high=1, low=1, close=1)]}
 

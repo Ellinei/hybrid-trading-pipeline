@@ -10,7 +10,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
@@ -26,7 +26,7 @@ from signals.regime import (
     utc_date,
 )
 
-_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_START = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _hourly_bars(daily_closes: list[float]) -> list[OHLCVBar]:
@@ -234,5 +234,5 @@ class TestUtcDate:
         assert utc_date(local) == date(2025, 12, 31)
 
     def test_utc_aware_datetime_unchanged(self):
-        aware = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+        aware = datetime(2026, 1, 1, 23, 30, tzinfo=UTC)
         assert utc_date(aware) == date(2026, 1, 1)

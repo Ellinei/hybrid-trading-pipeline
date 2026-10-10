@@ -23,8 +23,11 @@ def _refresh() -> None:
     os.environ.setdefault("POSTGRES_PORT", "5432")
 
     from ingestion.feature_validation import (
-        build_validation_engine, configured_symbols, feature_refresh_lock,
-        mark_features_invalid, mark_features_valid,
+        build_validation_engine,
+        configured_symbols,
+        feature_refresh_lock,
+        mark_features_invalid,
+        mark_features_valid,
     )
     from ingestion.rest_backfill import run_backfill
 

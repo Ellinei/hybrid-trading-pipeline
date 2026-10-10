@@ -13,7 +13,7 @@ Run:
 from __future__ import annotations
 
 import decimal
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -27,7 +27,9 @@ class TestFingerprintSymbol:
         engine = MagicMock()
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
-        conn.execute.return_value.fetchone.return_value = (26280, "2026-07-04 00:00:00+00", "digest")
+        conn.execute.return_value.fetchone.return_value = (
+            26280, "2026-07-04 00:00:00+00", "digest",
+        )
 
         result = data_store._fingerprint_symbol(engine, "raw.ohlcv", "BTCUSDT")
 
@@ -111,7 +113,7 @@ class TestLoadOrRefresh:
 
     def test_tz_aware_timestamps_round_trip_through_parquet(self, tmp_path, monkeypatch):
         monkeypatch.setattr(data_store, "SNAPSHOT_DIR", str(tmp_path))
-        ts = [datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)]
+        ts = [datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)]
         query_fn = MagicMock(return_value=pd.DataFrame({"timestamp": ts, "close": [1.0, 2.0]}))
         fp_fn = MagicMock(return_value=(2, "2026-01-02"))
 

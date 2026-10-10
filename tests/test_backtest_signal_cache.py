@@ -10,8 +10,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import numpy as np
@@ -27,7 +26,7 @@ from backtest.signal_cache import (
 from signals.base import SignalDirection
 from signals.ml_model import MLSignalGenerator
 
-_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_START = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _feature_df(n_rows: int, symbol: str = "BTCUSDT", **rule_overrides) -> pd.DataFrame:

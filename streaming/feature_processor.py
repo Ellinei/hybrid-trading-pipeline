@@ -17,7 +17,7 @@ import os
 import signal
 from bisect import insort_right
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 from statistics import StatisticsError, stdev
 from typing import Any
@@ -79,7 +79,7 @@ def filter_window(
 ) -> list[TickRecord]:
     """Return ticks whose timestamp >= (now - minutes). Preserves order."""
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     cutoff = now - timedelta(minutes=minutes)
     return [t for t in buffer if t.timestamp >= cutoff]
 
@@ -110,7 +110,7 @@ def compute_features(
         Dict with all feature columns + symbol and timestamp.
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     ticks_1m = filter_window(buffer, minutes=1, now=now)
     ticks_5m = filter_window(buffer, minutes=5, now=now)
@@ -252,7 +252,7 @@ class FeatureProcessor:
                 raise ValueError("Trade symbol must be a non-empty string")
             ts = datetime.fromisoformat(msg["timestamp"])
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
             tick = TickRecord(
                 timestamp=ts,
                 price=_positive_float(msg["price"]),
@@ -270,7 +270,7 @@ class FeatureProcessor:
             insort_right(buf, tick, key=lambda item: item.timestamp)
 
     def _maybe_flush_all(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for symbol, buf in self._buffers.items():
             last = self._last_flush.get(symbol)
             if last is None or (now - last).total_seconds() >= _FLUSH_INTERVAL_S:

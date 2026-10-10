@@ -9,12 +9,12 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-from backtest.state import BacktestState, OpenPosition
 from backtest.sim_risk_manager import SimulatedRiskManager
+from backtest.state import BacktestState, OpenPosition
 from execution.risk_manager import RiskConfig
 from signals.base import AggregatedSignal, Signal, SignalDirection
 
@@ -22,8 +22,8 @@ from signals.base import AggregatedSignal, Signal, SignalDirection
 def _signal(direction=SignalDirection.BUY, confidence=0.9, symbol="BTCUSDT"):
     return AggregatedSignal(
         direction=direction, confidence=confidence, symbol=symbol,
-        timestamp=datetime.now(timezone.utc),
-        signals=[Signal(direction, confidence, "technical", symbol, datetime.now(timezone.utc))],
+        timestamp=datetime.now(UTC),
+        signals=[Signal(direction, confidence, "technical", symbol, datetime.now(UTC))],
         reasoning="test", weights_used={},
     )
 
@@ -50,7 +50,7 @@ class TestSimulatedRiskManagerIOOverrides:
 
         state.positions["BTCUSDT"] = OpenPosition(
             symbol="BTCUSDT", quantity=1.0, entry_price=100.0,
-            entry_time=datetime.now(timezone.utc), stop_loss=90.0, take_profit=120.0,
+            entry_time=datetime.now(UTC), stop_loss=90.0, take_profit=120.0,
         )
         assert risk.has_open_position("BTCUSDT") is True
 
@@ -60,7 +60,7 @@ class TestSimulatedRiskManagerIOOverrides:
         assert risk.get_open_position_count() == 0
         state.positions["BTCUSDT"] = OpenPosition(
             symbol="BTCUSDT", quantity=1.0, entry_price=100.0,
-            entry_time=datetime.now(timezone.utc), stop_loss=90.0, take_profit=120.0,
+            entry_time=datetime.now(UTC), stop_loss=90.0, take_profit=120.0,
         )
         assert risk.get_open_position_count() == 1
 
@@ -117,11 +117,11 @@ class TestSimulatedRiskManagerIOOverrides:
 
         state.positions["BTCUSDT"] = OpenPosition(
             symbol="BTCUSDT", quantity=2.0, entry_price=100.0,
-            entry_time=datetime.now(timezone.utc), stop_loss=90.0, take_profit=120.0,
+            entry_time=datetime.now(UTC), stop_loss=90.0, take_profit=120.0,
         )
         state.positions["ETHUSDT"] = OpenPosition(
             symbol="ETHUSDT", quantity=1.0, entry_price=50.0,
-            entry_time=datetime.now(timezone.utc), stop_loss=45.0, take_profit=60.0,
+            entry_time=datetime.now(UTC), stop_loss=45.0, take_profit=60.0,
         )
         # BTC: (100-90)*2 = 20; ETH: (50-45)*1 = 5
         assert risk.get_open_position_risk() == pytest.approx(25.0)
@@ -173,10 +173,12 @@ class TestSimulatedRiskManagerReusesLiveGating:
         # would push total past the $40 cap (4% of $1000).
         state.positions["ETHUSDT"] = OpenPosition(
             symbol="ETHUSDT", quantity=1.0, entry_price=100.0,
-            entry_time=datetime.now(timezone.utc), stop_loss=70.0, take_profit=160.0,
+            entry_time=datetime.now(UTC), stop_loss=70.0, take_profit=160.0,
         )
 
-        approved, reason = risk.approve_trade(_signal(confidence=0.9, symbol="BTCUSDT"), price=100.0)
+        approved, reason = risk.approve_trade(
+            _signal(confidence=0.9, symbol="BTCUSDT"), price=100.0,
+        )
 
         assert approved is False
         assert "risk cap" in reason
@@ -188,7 +190,7 @@ class TestSimulatedRiskManagerReusesLiveGating:
         state.current_atr["BTCUSDT"] = 5.0
         state.positions["ETHUSDT"] = OpenPosition(
             symbol="ETHUSDT", quantity=1.0, entry_price=100.0,
-            entry_time=datetime.now(timezone.utc), stop_loss=70.0, take_profit=160.0,
+            entry_time=datetime.now(UTC), stop_loss=70.0, take_profit=160.0,
         )
 
         approved, _ = risk.approve_trade(_signal(confidence=0.9, symbol="BTCUSDT"), price=100.0)

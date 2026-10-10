@@ -22,7 +22,7 @@ timestamps.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -31,7 +31,7 @@ from sklearn.model_selection import TimeSeriesSplit
 
 from signals.ml_model import MLSignalGenerator
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _symbol_grouped_frame(hours=8, symbols=("AAA", "BBB")):

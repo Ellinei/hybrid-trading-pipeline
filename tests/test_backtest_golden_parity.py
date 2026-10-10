@@ -72,7 +72,9 @@ def _db_available() -> bool:
 
 
 @pytest.mark.skipif(not CACHE_PATH.exists(), reason="prob cache cache/wf_540d_h8.pkl not present")
-@pytest.mark.skipif(not GOLDEN_CSV.exists(), reason="golden baseline not captured — see results/golden/")
+@pytest.mark.skipif(
+    not GOLDEN_CSV.exists(), reason="golden baseline not captured — see results/golden/",
+)
 def test_exp007_cache_replay_matches_golden_baseline(tmp_path):
     """Re-run the exact exp007 --load-cache command; diff output byte-for-byte."""
     if not _db_available():

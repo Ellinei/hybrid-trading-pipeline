@@ -25,7 +25,8 @@ def _symbol_info(notional_filter_type="MIN_NOTIONAL", notional_key="minNotional"
         "symbol": "BTCUSDT",
         "filters": [
             {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "9000"},
-            {"filterType": "PRICE_FILTER", "tickSize": "0.01", "minPrice": "0.01", "maxPrice": "1000000"},
+            {"filterType": "PRICE_FILTER", "tickSize": "0.01",
+             "minPrice": "0.01", "maxPrice": "1000000"},
             {"filterType": notional_filter_type, notional_key: "10.00"},
         ],
     }

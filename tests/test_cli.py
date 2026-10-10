@@ -75,7 +75,8 @@ class TestExperimentSubcommand:
 
     def test_builds_config_from_args_and_calls_run_experiment(self):
         with patch("backtest.run_backtest.build_engine") as mock_build_engine, \
-             patch("backtest.experiment.run_experiment", return_value=self._fake_metrics()) as mock_run:
+             patch("backtest.experiment.run_experiment",
+                   return_value=self._fake_metrics()) as mock_run:
             code = main([
                 "experiment", "--id", "exp999",
                 "--ml-buy-threshold", "0.55", "--max-hold-bars", "24",
@@ -98,7 +99,8 @@ class TestExperimentSubcommand:
 
     def test_utc_evaluation_window_reaches_config(self):
         with patch("backtest.run_backtest.build_engine"), \
-             patch("backtest.experiment.run_experiment", return_value=self._fake_metrics()) as mock_run:
+             patch("backtest.experiment.run_experiment",
+                   return_value=self._fake_metrics()) as mock_run:
             assert main(["experiment", "--id", "bounded", "--start", "2026-01-01T00:00:00Z",
                          "--end", "2026-02-01T00:00:00+00:00"]) == 0
 

@@ -1,8 +1,8 @@
 """Causal live-training rows, partitions, and persisted provenance."""
 
-import json
 import hashlib
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -11,8 +11,7 @@ from sqlalchemy import create_engine, text
 
 from signals.ml_model import MLSignalGenerator, parse_train_args
 
-
-UTC = timezone.utc
+UTC = UTC
 
 
 def _feature_table():
@@ -21,7 +20,8 @@ def _feature_table():
         conn.execute(text("ATTACH DATABASE ':memory:' AS features"))
         columns = ", ".join(f"{name} REAL" for name in MLSignalGenerator.FEATURES)
         conn.execute(text(
-            f"CREATE TABLE features.feat_technical (symbol TEXT, timestamp TEXT, close REAL, {columns})"
+            "CREATE TABLE features.feat_technical "
+            f"(symbol TEXT, timestamp TEXT, close REAL, {columns})"
         ))
     return engine
 
@@ -42,7 +42,10 @@ def _rows(hours=20, symbols=("BTCUSDT", "ETHUSDT")):
     rows = []
     for hour in range(hours):
         for symbol in symbols:
-            row = {name: float(hour + offset / 100) for offset, name in enumerate(MLSignalGenerator.FEATURES)}
+            row = {
+                name: float(hour + offset / 100)
+                for offset, name in enumerate(MLSignalGenerator.FEATURES)
+            }
             row.update(
                 symbol=symbol,
                 timestamp=start + timedelta(hours=hour),
@@ -186,7 +189,10 @@ def test_train_cutoff_excludes_row_at_label_open_and_includes_one_bar_later(tmp_
     start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = []
     for hour in range(15):
-        row = {name: float(hour + offset / 100) for offset, name in enumerate(MLSignalGenerator.FEATURES)}
+        row = {
+            name: float(hour + offset / 100)
+            for offset, name in enumerate(MLSignalGenerator.FEATURES)
+        }
         row.update(
             symbol="BTCUSDT",
             timestamp=start + timedelta(hours=hour),
@@ -226,7 +232,10 @@ def test_frozen_training_persists_provenance_and_legacy_pickle_loads(tmp_path, m
     monkeypatch.setattr(MLSignalGenerator, "SCALER_PATH", str(tmp_path / "scaler.pkl"))
     rows = _rows(hours=40)
     gen = MLSignalGenerator(None)
-    monkeypatch.setattr(gen, "load_training_data", lambda symbol, **kwargs: rows[rows.symbol == symbol].copy())
+    monkeypatch.setattr(
+        gen, "load_training_data",
+        lambda symbol, **kwargs: rows[rows.symbol == symbol].copy(),
+    )
     cutoff = datetime(2026, 1, 3, tzinfo=UTC)
     params = {"max_depth": 2, "n_estimators": 2, "learning_rate": 0.1}
     metrics = gen.train(["ETHUSDT", "BTCUSDT"], as_of=cutoff,
@@ -244,8 +253,10 @@ def test_frozen_training_persists_provenance_and_legacy_pickle_loads(tmp_path, m
     assert "source_revision" in metadata
     assert len(metadata["source_file_sha256"]) == 64
     assert isinstance(metadata["source_dirty"], bool)
-    assert metadata["model_sha256"] == hashlib.sha256((tmp_path / "model.pkl").read_bytes()).hexdigest()
-    assert metadata["scaler_sha256"] == hashlib.sha256((tmp_path / "scaler.pkl").read_bytes()).hexdigest()
+    model_sha = hashlib.sha256((tmp_path / "model.pkl").read_bytes()).hexdigest()
+    scaler_sha = hashlib.sha256((tmp_path / "scaler.pkl").read_bytes()).hexdigest()
+    assert metadata["model_sha256"] == model_sha
+    assert metadata["scaler_sha256"] == scaler_sha
     # Reveal time is exactly one bar after open time — labelled distinctly
     # so a consumer can't mistake the open time for the moment it was known.
     open_ts = datetime.fromisoformat(metadata["training_last_label_open_timestamp"])
@@ -255,7 +266,8 @@ def test_frozen_training_persists_provenance_and_legacy_pickle_loads(tmp_path, m
     (tmp_path / "model.metadata.json").unlink()  # pre-provenance artifacts remain loadable
     loaded = MLSignalGenerator(None)
     assert loaded.load_model()
-    assert loaded.model.predict_proba(loaded.scaler.transform(np.ones((1, len(gen.FEATURES))))).shape == (1, 2)
+    scaled = loaded.scaler.transform(np.ones((1, len(gen.FEATURES))))
+    assert loaded.model.predict_proba(scaled).shape == (1, 2)
 
 
 def test_training_rejects_naive_cutoff():

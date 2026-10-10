@@ -17,7 +17,7 @@ import os
 import pickle
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -190,7 +190,7 @@ tab1, tab2, tab3, tab4 = st.tabs(
 # ---------------------------------------------------------------------------
 
 with tab1:
-    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     st.markdown(
         f"<h1 style='color:#e05252;'>Hybrid Trading Bot</h1>"
         f"<p style='color:#888;'>{now_utc} UTC</p>",
@@ -200,7 +200,7 @@ with tab1:
     # Live prices
     prices: dict[str, float] = {}
     c1, c2, c3 = st.columns(3)
-    for col, sym in zip([c1, c2, c3], SYMBOLS):
+    for col, sym in zip([c1, c2, c3], SYMBOLS, strict=False):
         p = get_live_price(sym)
         prices[sym] = p
         col.metric(sym, f"${p:,.2f}" if p else "—")

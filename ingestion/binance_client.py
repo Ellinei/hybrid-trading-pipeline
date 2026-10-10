@@ -11,7 +11,7 @@ from __future__ import annotations
 import functools
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import structlog
@@ -120,7 +120,7 @@ class BinanceClientWrapper:
         if not klines:
             return pd.DataFrame(columns=_OHLCV_COLS)
 
-        cutoff = as_of or datetime.now(timezone.utc)
+        cutoff = as_of or datetime.now(UTC)
         if cutoff.tzinfo is None or cutoff.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
         df = pd.DataFrame(klines, columns=_KLINE_COLS)

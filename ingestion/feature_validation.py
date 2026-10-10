@@ -13,7 +13,6 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-
 # A session lock covers the whole refresh, including dbt subprocesses. It is
 # shared by the Airflow job and the manual features command.
 _LOCK_KEY = 583_219_746_033

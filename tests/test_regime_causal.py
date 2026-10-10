@@ -1,5 +1,5 @@
 """Decision-time BTC regime contract shared by live and replay."""
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -8,12 +8,11 @@ from backtest.exit_simulation import OHLCVBar
 from backtest.signal_cache import ReplayAggregator
 from config.strategy import StrategyConfig
 from execution.bot_runner import run_once
-from signals.base import Signal, SignalDirection
 from signals.aggregator import SignalAggregator
+from signals.base import Signal, SignalDirection
 from signals.regime import RegimeState, build_causal_regime
 
-
-START = datetime(2025, 1, 1, tzinfo=timezone.utc)
+START = datetime(2025, 1, 1, tzinfo=UTC)
 
 
 def btc_days(closes):
@@ -65,8 +64,14 @@ def test_future_btc_close_cannot_change_earlier_intraday_entry():
     second = build_causal_regime(changed, "r1_sma200")
 
     assert first[decision.date()] == second[decision.date()] == RegimeState.RISK_ON
-    assert ReplayAggregator(buy_row(decision), {}, regime=first).aggregate("ETHUSDT", decision).direction == SignalDirection.BUY
-    assert ReplayAggregator(buy_row(decision), {}, regime=second).aggregate("ETHUSDT", decision).direction == SignalDirection.BUY
+    first_result = ReplayAggregator(buy_row(decision), {}, regime=first).aggregate(
+        "ETHUSDT", decision,
+    )
+    second_result = ReplayAggregator(buy_row(decision), {}, regime=second).aggregate(
+        "ETHUSDT", decision,
+    )
+    assert first_result.direction == SignalDirection.BUY
+    assert second_result.direction == SignalDirection.BUY
 
 
 def test_utc_rollover_requires_completed_previous_btc_day():
@@ -75,13 +80,17 @@ def test_utc_rollover_requires_completed_previous_btc_day():
     regime = build_causal_regime(bars, "r1_sma200")
     assert regime[decision.date()] == RegimeState.RISK_OFF
     assert (decision - timedelta(days=1)).date() not in regime
-    assert ReplayAggregator(buy_row(decision), {}, regime=regime).aggregate("ETHUSDT", decision).direction == SignalDirection.HOLD
+    result = ReplayAggregator(buy_row(decision), {}, regime=regime).aggregate(
+        "ETHUSDT", decision,
+    )
+    assert result.direction == SignalDirection.HOLD
     assert live_aggregator(regime).aggregate("ETHUSDT", decision).direction == SignalDirection.HOLD
 
 
 def test_incomplete_day_and_history_gap_leave_entry_unclassified():
     bars = btc_days([100.0] * 201)
-    missing_final_hour = [bar for bar in bars if bar.timestamp != START + timedelta(days=199, hours=23)]
+    final_hour = START + timedelta(days=199, hours=23)
+    missing_final_hour = [bar for bar in bars if bar.timestamp != final_hour]
     regime = build_causal_regime(missing_final_hour, "r1_sma200")
     assert (START + timedelta(days=200)).date() not in regime
     assert (START + timedelta(days=201)).date() not in regime
@@ -101,8 +110,10 @@ def test_enabled_gate_blocks_missing_or_invalid_state_on_fresh_eth():
 def test_disabled_gate_allows_buy_and_missing_gate_keeps_sell():
     at = START + timedelta(days=200)
     assert live_aggregator(None).aggregate("ETHUSDT", at).direction == SignalDirection.BUY
-    assert ReplayAggregator(buy_row(at), {}, regime=None).aggregate("ETHUSDT", at).direction == SignalDirection.BUY
-    assert live_aggregator({}, SignalDirection.SELL).aggregate("ETHUSDT", at).direction == SignalDirection.SELL
+    replay = ReplayAggregator(buy_row(at), {}, regime=None).aggregate("ETHUSDT", at)
+    live = live_aggregator({}, SignalDirection.SELL).aggregate("ETHUSDT", at)
+    assert replay.direction == SignalDirection.BUY
+    assert live.direction == SignalDirection.SELL
 
 
 def test_missing_btc_blocks_eth_buy_even_when_eth_is_fresh_and_journals_reason():
@@ -154,7 +165,7 @@ def test_non_utc_timestamp_uses_utc_calendar_date_for_regime_lookup():
 
 
 def test_refresh_failure_blocks_buy_then_recovery_allows_it():
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     aggregator = live_aggregator({today: RegimeState.RISK_ON})
     executor = MagicMock()
     cfg = StrategyConfig(regime_candidate="r1_sma200")

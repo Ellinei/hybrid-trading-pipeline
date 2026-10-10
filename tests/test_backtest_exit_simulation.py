@@ -5,7 +5,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -22,14 +22,14 @@ from backtest.state import OpenPosition
 def _position(stop_loss=90.0, take_profit=120.0, entry_price=100.0, qty=1.0):
     return OpenPosition(
         symbol="BTCUSDT", quantity=qty, entry_price=entry_price,
-        entry_time=datetime.now(timezone.utc),
+        entry_time=datetime.now(UTC),
         stop_loss=stop_loss, take_profit=take_profit,
     )
 
 
 def _bar(low, high, close=None, open_=None, ts=None):
     return OHLCVBar(
-        timestamp=ts or datetime.now(timezone.utc),
+        timestamp=ts or datetime.now(UTC),
         open=open_ if open_ is not None else low,
         high=high, low=low,
         close=close if close is not None else high,
@@ -49,14 +49,18 @@ class TestApplySlippage:
 
 class TestSimulateEntryFill:
     def test_returns_fill_price_and_fee(self):
-        fill_price, fee = simulate_entry_fill(price=100.0, qty=2.0, fee_rate=0.001, slippage_bps=10.0)
+        fill_price, fee = simulate_entry_fill(
+            price=100.0, qty=2.0, fee_rate=0.001, slippage_bps=10.0,
+        )
         assert fill_price == pytest.approx(100.1)
         assert fee == pytest.approx(100.1 * 2.0 * 0.001)
 
 
 class TestSimulateExitFill:
     def test_returns_fill_price_and_fee(self):
-        fill_price, fee = simulate_exit_fill(price=100.0, qty=2.0, fee_rate=0.001, slippage_bps=10.0)
+        fill_price, fee = simulate_exit_fill(
+            price=100.0, qty=2.0, fee_rate=0.001, slippage_bps=10.0,
+        )
         assert fill_price == pytest.approx(99.9)
         assert fee == pytest.approx(99.9 * 2.0 * 0.001)
 

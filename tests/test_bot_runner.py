@@ -10,7 +10,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,8 +18,13 @@ import pytest
 from config.strategy import StrategyConfig
 from execution import bot_runner
 from execution.bot_runner import (
-    build_aggregator, build_market_data_client, build_risk_manager, initial_regime, resolve_regime,
-    run_loop, run_once,
+    build_aggregator,
+    build_market_data_client,
+    build_risk_manager,
+    initial_regime,
+    resolve_regime,
+    run_loop,
+    run_once,
 )
 
 
@@ -107,7 +112,7 @@ class TestResolveRegime:
         from signals.regime import RegimeState
 
         bars = [
-            OHLCVBar(timestamp=datetime(2026, 1, d, tzinfo=timezone.utc),
+            OHLCVBar(timestamp=datetime(2026, 1, d, tzinfo=UTC),
                      open=100.0, high=101.0, low=99.0, close=100.0)
             for d in range(1, 5)
         ]
@@ -250,7 +255,8 @@ class TestRunOnceRegimeRefresh:
             lambda *a, **k: call_order.append(("aggregate", aggregator._regime)) or MagicMock()
         )
 
-        with patch("execution.bot_runner.resolve_regime", return_value=fresh_regime) as mock_resolve:
+        with patch("execution.bot_runner.resolve_regime",
+                   return_value=fresh_regime) as mock_resolve:
             run_once(["BTCUSDT"], executor, aggregator, engine=engine, strategy_cfg=cfg)
 
         mock_resolve.assert_called_once_with(engine, cfg)
@@ -290,10 +296,12 @@ class TestRunOnceRegimeRefresh:
         from signals.base import AggregatedSignal, SignalDirection
 
         executor = MagicMock()
-        executor.close_expired_positions.return_value = [{"symbol": "BTCUSDT", "close_reason": "time_stop"}]
+        executor.close_expired_positions.return_value = [
+            {"symbol": "BTCUSDT", "close_reason": "time_stop"},
+        ]
         aggregator = MagicMock()
         aggregator.aggregate.return_value = AggregatedSignal(
-            SignalDirection.SELL, 0.4, "ETHUSDT", datetime.now(timezone.utc), [], "sell", {},
+            SignalDirection.SELL, 0.4, "ETHUSDT", datetime.now(UTC), [], "sell", {},
         )
         journal = MagicMock()
         journal.record.return_value = True

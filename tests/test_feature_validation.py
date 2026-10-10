@@ -8,7 +8,6 @@ import pytest
 
 from execution.freshness import FreshnessMonitor
 
-
 NOW = datetime(2026, 9, 23, 1, tzinfo=UTC)
 
 
@@ -78,7 +77,8 @@ def test_refresh_lock_rejects_concurrent_writer():
     from ingestion.feature_validation import feature_refresh_lock
 
     engine = MagicMock()
-    engine.connect.return_value.__enter__.return_value.execute.return_value.scalar.return_value = False
+    conn = engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.scalar.return_value = False
     with pytest.raises(RuntimeError, match="already running"):
         with feature_refresh_lock(engine):
             pytest.fail("lock should reject the writer")

@@ -8,12 +8,11 @@ Run:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from statistics import stdev
 from unittest.mock import Mock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Environment fixture — runs before every test
@@ -184,7 +183,7 @@ class TestFeatureComputation:
     def test_vwap_weighted_by_volume(self):
         from streaming.feature_processor import TickRecord, compute_vwap
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         ticks = [
             TickRecord(now, price=100.0, quantity=1.0),
             TickRecord(now, price=200.0, quantity=3.0),
@@ -200,13 +199,13 @@ class TestFeatureComputation:
     def test_vwap_returns_none_when_total_volume_is_zero(self):
         from streaming.feature_processor import TickRecord, compute_vwap
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         assert compute_vwap([TickRecord(now, price=100.0, quantity=0.0)]) is None
 
     def test_compute_features_trade_count_within_1m(self):
         from streaming.feature_processor import TickRecord, compute_features
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Buffer ordered oldest-first, as it would be in real usage
         ticks = [
             TickRecord(now - timedelta(seconds=90), price=98.0,  quantity=1.0),  # outside 1m
@@ -220,7 +219,7 @@ class TestFeatureComputation:
     def test_compute_features_last_price_is_most_recent(self):
         from streaming.feature_processor import TickRecord, compute_features
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         ticks = [
             TickRecord(now - timedelta(seconds=20), price=100.0, quantity=1.0),
             TickRecord(now - timedelta(seconds=10), price=105.0, quantity=1.0),  # newest
@@ -231,7 +230,7 @@ class TestFeatureComputation:
     def test_compute_features_volatility_matches_stdev(self):
         from streaming.feature_processor import TickRecord, compute_features
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         prices = [100.0, 101.0, 99.0, 102.0, 98.0]
         # oldest at index 0, newest at index -1, all within 1 minute
         ticks = [
@@ -245,7 +244,7 @@ class TestFeatureComputation:
         """stdev requires ≥ 2 points — single-tick window yields None."""
         from streaming.feature_processor import TickRecord, compute_features
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         ticks = [TickRecord(now, price=100.0, quantity=1.0)]
         result = compute_features("BTCUSDT", ticks, now=now)
         assert result["volatility_1m"] is None
@@ -253,7 +252,7 @@ class TestFeatureComputation:
     def test_compute_features_empty_buffer_returns_none_last_price(self):
         from streaming.feature_processor import compute_features
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result = compute_features("BTCUSDT", [], now=now)
         assert result["last_price"] is None
 
@@ -268,7 +267,7 @@ class TestBufferWindow:
     def test_filter_1m_and_5m_windows(self):
         from streaming.feature_processor import TickRecord, filter_window
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         ticks = [
             TickRecord(now - timedelta(minutes=10), price=102.0, quantity=1.0),  # outside 5m
             TickRecord(now - timedelta(seconds=90), price=101.0, quantity=1.0),  # in 5m, out of 1m
@@ -280,7 +279,7 @@ class TestBufferWindow:
     def test_filter_includes_tick_at_exact_boundary(self):
         from streaming.feature_processor import TickRecord, filter_window
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         boundary = TickRecord(now - timedelta(minutes=1), price=100.0, quantity=1.0)
         # Exactly at the cutoff — must be INCLUDED (>= semantics)
         assert len(filter_window([boundary], minutes=1, now=now)) == 1
@@ -288,19 +287,19 @@ class TestBufferWindow:
     def test_filter_empty_buffer_returns_empty_list(self):
         from streaming.feature_processor import filter_window
 
-        assert filter_window([], minutes=1, now=datetime.now(timezone.utc)) == []
+        assert filter_window([], minutes=1, now=datetime.now(UTC)) == []
 
     def test_filter_uses_real_current_time_when_now_not_provided(self):
         from streaming.feature_processor import TickRecord, filter_window
 
         # Tick from 2 minutes ago must fall outside the 1m window
-        old = datetime.now(timezone.utc) - timedelta(minutes=2)
+        old = datetime.now(UTC) - timedelta(minutes=2)
         assert filter_window([TickRecord(old, 100.0, 1.0)], minutes=1) == []
 
     def test_filter_keeps_all_ticks_when_all_in_window(self):
         from streaming.feature_processor import TickRecord, filter_window
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         ticks = [
             TickRecord(now - timedelta(seconds=30), price=100.0, quantity=1.0),
             TickRecord(now - timedelta(seconds=20), price=101.0, quantity=1.0),
@@ -318,6 +317,7 @@ class TestProcessMessageMalformed:
 
     def _make_processor(self):
         import structlog
+
         from streaming.feature_processor import FeatureProcessor
 
         proc = FeatureProcessor.__new__(FeatureProcessor)
@@ -426,7 +426,7 @@ class TestProcessorWindowRetention:
     @pytest.mark.parametrize("trade_count", [100, 101, 250])
     def test_busy_window_retains_every_trade(self, trade_count):
         proc = self._make_processor()
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         # A large early trade must still contribute after 100 newer trades.
         self._add_trade(proc, now - timedelta(seconds=50), price=200.0, quantity=10.0)
         for _ in range(trade_count - 1):
@@ -441,7 +441,7 @@ class TestProcessorWindowRetention:
 
     def test_flush_prunes_expired_trades_and_keeps_five_minute_boundary(self):
         proc = self._make_processor()
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         self._add_trade(proc, now - timedelta(minutes=6), price=1.0)
         self._add_trade(proc, now - timedelta(minutes=5), price=200.0)
         self._add_trade(proc, now - timedelta(seconds=10))
@@ -455,7 +455,7 @@ class TestProcessorWindowRetention:
 
     def test_idle_symbol_retains_only_last_known_price(self):
         proc = self._make_processor()
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         self._add_trade(proc, now - timedelta(minutes=7), price=200.0)
         self._add_trade(proc, now - timedelta(minutes=6), price=150.0)
 
@@ -468,7 +468,7 @@ class TestProcessorWindowRetention:
 
     def test_late_trade_preserves_event_time_price_change_and_last_price(self):
         proc = self._make_processor()
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         self._add_trade(proc, now - timedelta(seconds=10), price=120.0)
         self._add_trade(proc, now - timedelta(seconds=50), price=100.0)
         self._add_trade(proc, now - timedelta(seconds=30), price=110.0)
@@ -483,7 +483,7 @@ class TestProcessorWindowRetention:
 
     def test_expired_late_trade_does_not_replace_idle_last_price(self):
         proc = self._make_processor()
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         self._add_trade(proc, now - timedelta(minutes=6), price=120.0)
         self._add_trade(proc, now - timedelta(minutes=7), price=100.0)
 

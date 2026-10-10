@@ -2,8 +2,9 @@
 
 Uptime is counted from raw.bot_heartbeat, where each completed cycle writes
 one row. Since activation only the trial bot writes heartbeats, so the number
-of distinct UTC hours with a heartbeat is the number of evaluated hours. The protocol amendment in docs/forward-trial.md
-targets 168 (7 days of cumulative uptime) and reports every gap.
+of distinct UTC hours with a heartbeat is the number of evaluated hours. The
+protocol amendment in docs/forward-trial.md targets 168 (7 days of cumulative
+uptime) and reports every gap.
 
     python scripts/trial_report.py            # account + heartbeat uptime
     python scripts/trial_report.py --no-db    # account only (Postgres down)
@@ -14,12 +15,12 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TRIAL_DB = REPO / "results" / "forward_20260924.sqlite3"
-ACTIVATION = datetime(2026, 9, 25, 12, 37, 51, tzinfo=timezone.utc)
+ACTIVATION = datetime(2026, 9, 25, 12, 37, 51, tzinfo=UTC)
 TARGET_HOURS = 168
 # Hourly cycles plus cycle time; a longer interval is downtime.
 GAP_THRESHOLD = timedelta(minutes=70)
@@ -70,18 +71,20 @@ def _heartbeats() -> None:
         print("Heartbeats since activation: none")
         return
     stamps = [r[0] for r in rows]
-    gaps = [(a, b) for a, b in zip(stamps, stamps[1:]) if b - a > GAP_THRESHOLD]
-    since_last = datetime.now(timezone.utc) - stamps[-1]
+    gaps = [(a, b) for a, b in zip(stamps, stamps[1:], strict=False) if b - a > GAP_THRESHOLD]
+    since_last = datetime.now(UTC) - stamps[-1]
     # A restart runs one cycle immediately, so two heartbeats can share an
     # hour. Count distinct UTC hours with a heartbeat instead of rows.
     hours = len({ts.replace(minute=0, second=0, microsecond=0) for ts in stamps})
     print(f"Hours evaluated since activation: {hours} / {TARGET_HOURS} target "
           f"({100 * hours / TARGET_HOURS:.0f}%); {len(rows)} cycles, "
           f"cycle errors {sum(r[1] for r in rows)}")
-    print(f"Last heartbeat: {stamps[-1]:%Y-%m-%d %H:%M} UTC ({since_last.total_seconds() / 60:.0f} min ago)")
+    minutes_ago = since_last.total_seconds() / 60
+    print(f"Last heartbeat: {stamps[-1]:%Y-%m-%d %H:%M} UTC ({minutes_ago:.0f} min ago)")
     print(f"Downtime gaps (> {GAP_THRESHOLD.seconds // 60} min): {len(gaps)}")
     for a, b in gaps[-10:]:
-        print(f"  {a:%Y-%m-%d %H:%M} -> {b:%Y-%m-%d %H:%M} UTC ({(b - a).total_seconds() / 3600:.1f} h)")
+        hours = (b - a).total_seconds() / 3600
+        print(f"  {a:%Y-%m-%d %H:%M} -> {b:%Y-%m-%d %H:%M} UTC ({hours:.1f} h)")
 
 
 def main() -> int:

@@ -7,12 +7,11 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -118,7 +117,7 @@ class TestGetAccountBalance:
         MockClient.return_value.get_asset_balance.side_effect = Exception("timeout")
 
         from ingestion.binance_client import BinanceClientWrapper
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="timeout"):
             BinanceClientWrapper().get_account_balance("USDT")
 
     @patch("ingestion.binance_client.Client")
@@ -229,7 +228,7 @@ class TestFetchOHLCV:
 
         MockClient.return_value.get_historical_klines.return_value = _MOCK_KLINES
         wrapper = BinanceClientWrapper()
-        at_boundary = datetime(2021, 1, 1, 1, tzinfo=timezone.utc)
+        at_boundary = datetime(2021, 1, 1, 1, tzinfo=UTC)
         df = wrapper.fetch_ohlcv("BTCUSDT", as_of=at_boundary)
         assert list(df["close"]) == [29300.0]
         assert wrapper.fetch_ohlcv(
@@ -249,7 +248,7 @@ class TestBackfillIdempotency:
 
     _ROW = {
         "symbol": "BTCUSDT",
-        "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+        "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
         "open": 42_000.0, "high": 43_000.0, "low": 41_000.0,
         "close": 42_500.0, "volume": 10.5,
         "quote_volume": 441_000.0, "trades": 500, "taker_buy_vol": 5.25,
@@ -260,7 +259,8 @@ class TestBackfillIdempotency:
 
         assert "ON CONFLICT" in OHLCV_INSERT_SQL
         assert "DO UPDATE SET" in OHLCV_INSERT_SQL
-        for column in ("open", "high", "low", "close", "volume", "quote_volume", "trades", "taker_buy_vol"):
+        for column in ("open", "high", "low", "close", "volume",
+                       "quote_volume", "trades", "taker_buy_vol"):
             assert f"{column} = EXCLUDED.{column}" in OHLCV_INSERT_SQL
 
     def test_calling_upsert_twice_invokes_execute_values_twice(self):
@@ -290,8 +290,8 @@ class TestIncrementalRepair:
     def test_overlap_refetches_latest_and_gaps_and_stops_at_fixed_snapshot(self):
         from ingestion.rest_backfill import backfill_symbol
 
-        now = datetime(2024, 1, 3, 3, tzinfo=timezone.utc)
-        latest = datetime(2024, 1, 3, 1, tzinfo=timezone.utc)
+        now = datetime(2024, 1, 3, 3, tzinfo=UTC)
+        latest = datetime(2024, 1, 3, 1, tzinfo=UTC)
         client = MagicMock()
         client.fetch_ohlcv.return_value = pd.DataFrame({
             "symbol": ["BTCUSDT", "BTCUSDT"],
@@ -311,8 +311,8 @@ class TestIncrementalRepair:
     def test_delayed_exchange_candle_is_picked_up_on_next_run(self):
         from ingestion.rest_backfill import backfill_symbol
 
-        now = datetime(2024, 1, 3, 3, tzinfo=timezone.utc)
-        latest = datetime(2024, 1, 3, 1, tzinfo=timezone.utc)
+        now = datetime(2024, 1, 3, 3, tzinfo=UTC)
+        latest = datetime(2024, 1, 3, 1, tzinfo=UTC)
         client = MagicMock()
         client.fetch_ohlcv.side_effect = [
             pd.DataFrame(),
@@ -335,8 +335,8 @@ class TestIncrementalRepair:
     def test_nonadvancing_full_batch_fails_instead_of_looping(self):
         from ingestion.rest_backfill import backfill_symbol
 
-        now = datetime(2024, 1, 3, 3, tzinfo=timezone.utc)
-        latest = datetime(2024, 1, 3, 1, tzinfo=timezone.utc)
+        now = datetime(2024, 1, 3, 3, tzinfo=UTC)
+        latest = datetime(2024, 1, 3, 1, tzinfo=UTC)
         client = MagicMock()
         client.fetch_ohlcv.return_value = pd.DataFrame({
             "timestamp": pd.to_datetime(["2024-01-01T00:00:00Z"] * 1000),
@@ -424,7 +424,8 @@ class TestBackfillFailure:
         # backfill_symbol. Those three must be mocked here too, or this
         # test opens a real engine/connection against whatever POSTGRES_*
         # the _test_env fixture set, same hole as the test above.
-        with patch("ingestion.feature_validation.build_validation_engine", return_value=MagicMock()), \
+        with patch("ingestion.feature_validation.build_validation_engine",
+                   return_value=MagicMock()), \
              patch("ingestion.feature_validation.feature_refresh_lock"), \
              patch("ingestion.feature_validation.mark_features_invalid"), \
              patch("ingestion.models.create_all_tables"), patch(

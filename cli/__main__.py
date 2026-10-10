@@ -23,6 +23,7 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import UTC
 
 _SUBCOMMANDS = {
     "backfill": "ingestion.rest_backfill",
@@ -61,9 +62,12 @@ def _run_features(rest: list[str]) -> int:
     if rest:
         print(f"  NOTE: 'features' takes no extra args; ignoring: {rest}")
     from dotenv import load_dotenv
+
     from ingestion.feature_validation import (
-        build_validation_engine, feature_refresh_lock,
-        mark_features_invalid, mark_features_valid,
+        build_validation_engine,
+        feature_refresh_lock,
+        mark_features_invalid,
+        mark_features_valid,
     )
 
     load_dotenv()
@@ -119,7 +123,7 @@ def _parse_experiment_args(rest: list[str]) -> argparse.Namespace:
 
 
 def _parse_utc_datetime(value: str):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -127,7 +131,7 @@ def _parse_utc_datetime(value: str):
         raise argparse.ArgumentTypeError("expected ISO 8601 date-time with UTC offset") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise argparse.ArgumentTypeError("date-time must include a UTC offset")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _run_experiment(rest: list[str]) -> int:
@@ -138,7 +142,11 @@ def _run_experiment(rest: list[str]) -> int:
     symbols = (
         [s.strip() for s in args.symbols.split(",") if s.strip()]
         if args.symbols else
-        [s.strip() for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
+        [
+            s.strip()
+            for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+            if s.strip()
+        ]
     )
     cfg = ExperimentConfig(
         exp_id=args.exp_id, symbols=symbols,

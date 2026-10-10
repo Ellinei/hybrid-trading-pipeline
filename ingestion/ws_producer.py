@@ -14,7 +14,7 @@ import os
 import signal
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -37,11 +37,11 @@ def _to_iso(dt: datetime) -> str:
 
 
 def _ms_to_iso(ms: int) -> str:
-    return _to_iso(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
+    return _to_iso(datetime.fromtimestamp(ms / 1000, tz=UTC))
 
 
 def _now_iso() -> str:
-    return _to_iso(datetime.now(timezone.utc))
+    return _to_iso(datetime.now(UTC))
 
 
 def _format_trade(data: dict[str, Any]) -> dict[str, Any]:

@@ -1,5 +1,5 @@
 """Regressions for causal labels, cache identity, regime startup and scoring."""
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,8 +17,7 @@ from execution.bot_runner import run_once
 from signals.base import AggregatedSignal, SignalDirection
 from signals.regime import RegimeState
 
-
-UTC = timezone.utc
+UTC = UTC
 START = datetime(2026, 1, 1, tzinfo=UTC)
 
 
