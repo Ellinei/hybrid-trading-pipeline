@@ -10,8 +10,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import numpy as np
@@ -27,7 +26,7 @@ from backtest.signal_cache import (
 from signals.base import SignalDirection
 from signals.ml_model import MLSignalGenerator
 
-_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_START = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _feature_df(n_rows: int, symbol: str = "BTCUSDT", **rule_overrides) -> pd.DataFrame:
@@ -199,8 +198,7 @@ class TestReplayAggregatorRegimeGate:
 
         assert result.direction == SignalDirection.BUY
 
-    def test_missing_date_in_regime_dict_defaults_to_allowing_buy(self):
-        from signals.regime import RegimeState
+    def test_missing_date_in_enabled_regime_dict_blocks_buy(self):
 
         df = self._buy_signal_df()
         regime = {}  # no entry for this date at all
@@ -208,7 +206,8 @@ class TestReplayAggregatorRegimeGate:
 
         result = agg.aggregate("BTCUSDT", as_of=_START)
 
-        assert result.direction == SignalDirection.BUY
+        assert result.direction == SignalDirection.HOLD
+        assert "classification_unavailable" in result.reasoning
 
     def test_never_blocks_a_sell(self):
         from signals.regime import RegimeState

@@ -15,8 +15,10 @@ from __future__ import annotations
 import json
 import os
 import signal
+from bisect import insort_right
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from math import isfinite
 from statistics import StatisticsError, stdev
 from typing import Any
 from urllib.parse import quote_plus
@@ -32,7 +34,6 @@ from ingestion.models import create_all_tables
 log = structlog.get_logger()
 
 _FLUSH_INTERVAL_S = 60
-_BUFFER_MAX = 100
 
 FEATURE_UPSERT_SQL = """
     INSERT INTO raw.realtime_features
@@ -61,6 +62,16 @@ class TickRecord:
     quantity: float
 
 
+def _positive_float(value: Any) -> float:
+    """Parse a trade amount, rejecting booleans and non-finite values."""
+    if isinstance(value, bool):
+        raise ValueError("Trade amounts cannot be booleans")
+    number = float(value)
+    if not isfinite(number) or number <= 0:
+        raise ValueError("Trade amounts must be finite and positive")
+    return number
+
+
 def filter_window(
     buffer: list[TickRecord],
     minutes: int,
@@ -68,7 +79,7 @@ def filter_window(
 ) -> list[TickRecord]:
     """Return ticks whose timestamp >= (now - minutes). Preserves order."""
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     cutoff = now - timedelta(minutes=minutes)
     return [t for t in buffer if t.timestamp >= cutoff]
 
@@ -99,7 +110,7 @@ def compute_features(
         Dict with all feature columns + symbol and timestamp.
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     ticks_1m = filter_window(buffer, minutes=1, now=now)
     ticks_5m = filter_window(buffer, minutes=5, now=now)
@@ -228,29 +239,44 @@ class FeatureProcessor:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _process_message(self, msg: dict[str, Any]) -> None:
+    def _process_message(self, msg: Any) -> None:
+        if not isinstance(msg, dict):
+            self._log.warning("bad_message", msg=msg)
+            return
         if msg.get("stream_type") != "trade":
             return
 
         try:
+            symbol = msg["symbol"]
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise ValueError("Trade symbol must be a non-empty string")
             ts = datetime.fromisoformat(msg["timestamp"])
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            tick = TickRecord(timestamp=ts, price=float(msg["price"]), quantity=float(msg["quantity"]))
-        except (KeyError, ValueError):
+                ts = ts.replace(tzinfo=UTC)
+            tick = TickRecord(
+                timestamp=ts,
+                price=_positive_float(msg["price"]),
+                quantity=_positive_float(msg["quantity"]),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
             self._log.warning("bad_message", msg=msg)
             return
 
-        buf = self._buffers.setdefault(msg["symbol"], [])
-        buf.append(tick)
-        if len(buf) > _BUFFER_MAX:
-            buf.pop(0)
+        buf = self._buffers.setdefault(symbol, [])
+        # Price changes and last_price depend on event order, not arrival order.
+        if not buf or tick.timestamp >= buf[-1].timestamp:
+            buf.append(tick)
+        else:
+            insort_right(buf, tick, key=lambda item: item.timestamp)
 
     def _maybe_flush_all(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for symbol, buf in self._buffers.items():
             last = self._last_flush.get(symbol)
             if last is None or (now - last).total_seconds() >= _FLUSH_INTERVAL_S:
+                # Retain the full feature window regardless of trade volume.
+                # For idle symbols, keep one tick for the last known price.
+                buf[:] = filter_window(buf, minutes=5, now=now) or buf[-1:]
                 try:
                     features = compute_features(symbol, buf, now=now)
                     if features["last_price"] is not None:

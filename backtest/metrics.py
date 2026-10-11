@@ -142,7 +142,7 @@ def sharpe_ratio(
         return 0.0
 
     returns = []
-    for (_, prev), (_, curr) in zip(equity_curve, equity_curve[1:]):
+    for (_, prev), (_, curr) in zip(equity_curve, equity_curve[1:], strict=False):
         if prev != 0:
             returns.append((curr - prev) / prev)
 

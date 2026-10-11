@@ -13,11 +13,10 @@ Run:
 from __future__ import annotations
 
 import decimal
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pandas as pd
-import pytest
 
 from backtest import data_store
 
@@ -28,28 +27,53 @@ class TestFingerprintSymbol:
         engine = MagicMock()
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
-        conn.execute.return_value.fetchone.return_value = (26280, "2026-07-04 00:00:00+00")
+        conn.execute.return_value.fetchone.return_value = (
+            26280, "2026-07-04 00:00:00+00", "digest",
+        )
 
         result = data_store._fingerprint_symbol(engine, "raw.ohlcv", "BTCUSDT")
 
-        assert result == (26280, "2026-07-04 00:00:00+00")
+        assert result == (26280, "2026-07-04 00:00:00+00", "digest")
         sql = str(conn.execute.call_args[0][0])
         assert "count" in sql.lower()
         assert "max" in sql.lower()
         assert "raw.ohlcv" in sql
+        assert "row_to_json" in sql.lower()
+        assert "order by timestamp" in sql.lower()
 
     def test_empty_table_returns_zero_none(self):
         engine = MagicMock()
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
-        conn.execute.return_value.fetchone.return_value = (0, None)
+        conn.execute.return_value.fetchone.return_value = (0, None, "empty")
 
-        assert data_store._fingerprint_symbol(engine, "raw.ohlcv", "BTCUSDT") == (0, None)
+        assert data_store._fingerprint_symbol(engine, "raw.ohlcv", "BTCUSDT") == (0, None, "empty")
+
+    def test_correction_changes_fingerprint_without_new_timestamp(self):
+        engine = MagicMock()
+        conn = engine.connect.return_value.__enter__.return_value
+        conn.execute.return_value.fetchone.side_effect = [
+            (24, "2026-09-22", "before"), (24, "2026-09-22", "corrected"),
+        ]
+        before = data_store._fingerprint_symbol(engine, "raw.ohlcv", "BTCUSDT")
+        after = data_store._fingerprint_symbol(engine, "raw.ohlcv", "BTCUSDT")
+        assert before != after
 
 
 class TestLoadOrRefresh:
     """The core freshness logic: skip the DB when the on-disk snapshot's
     fingerprint still matches; rebuild when it doesn't."""
+
+    def test_correction_refreshes_snapshot_at_same_count_and_timestamp(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(data_store, "SNAPSHOT_DIR", str(tmp_path))
+        query = MagicMock(side_effect=[
+            pd.DataFrame({"close": [100.0]}), pd.DataFrame({"close": [102.0]}),
+        ])
+        fingerprint = MagicMock(side_effect=[(1, "same", "old"), (1, "same", "new")])
+        data_store._load_or_refresh("corrected", "BTCUSDT", query, fingerprint)
+        result = data_store._load_or_refresh("corrected", "BTCUSDT", query, fingerprint)
+        assert result["close"].tolist() == [102.0]
+        assert query.call_count == 2
 
     def test_first_call_queries_and_writes_snapshot(self, tmp_path, monkeypatch):
         monkeypatch.setattr(data_store, "SNAPSHOT_DIR", str(tmp_path))
@@ -89,7 +113,7 @@ class TestLoadOrRefresh:
 
     def test_tz_aware_timestamps_round_trip_through_parquet(self, tmp_path, monkeypatch):
         monkeypatch.setattr(data_store, "SNAPSHOT_DIR", str(tmp_path))
-        ts = [datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)]
+        ts = [datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)]
         query_fn = MagicMock(return_value=pd.DataFrame({"timestamp": ts, "close": [1.0, 2.0]}))
         fp_fn = MagicMock(return_value=(2, "2026-01-02"))
 

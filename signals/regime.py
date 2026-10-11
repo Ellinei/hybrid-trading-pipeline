@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import enum
 import math
-from datetime import date
+from dataclasses import dataclass
+from datetime import UTC, date, timedelta
 
 from backtest.exit_simulation import OHLCVBar
 
@@ -62,7 +63,7 @@ def compute_regime_r1_sma200(daily_close: list[tuple[date, float]]) -> dict[date
     sma200 = _sma(closes, 200)
     return {
         d: RegimeState.RISK_ON if sma is None or close > sma else RegimeState.RISK_OFF
-        for d, close, sma in zip(dates, closes, sma200)
+        for d, close, sma in zip(dates, closes, sma200, strict=False)
     }
 
 
@@ -82,7 +83,7 @@ def compute_regime_r2_hysteresis_cross(
 
     regime: dict[date, RegimeState] = {}
     state = RegimeState.RISK_ON
-    for d, s50, s200 in zip(dates, sma50, sma200):
+    for d, s50, s200 in zip(dates, sma50, sma200, strict=False):
         if s50 is None or s200 is None:
             regime[d] = state
             continue
@@ -120,7 +121,7 @@ def compute_regime_r3_vol_percentile(
 
     regime: dict[date, RegimeState] = {}
     vol_history: list[float] = []
-    for d, v in zip(dates, vol):
+    for d, v in zip(dates, vol, strict=False):
         if v is None:
             regime[d] = RegimeState.RISK_ON
             continue
@@ -153,10 +154,113 @@ REGIME_FUNCTIONS = {
 }
 
 
-def days_blocked_pct(regime: dict[date, RegimeState]) -> float:
-    """% of days RISK_OFF — the diagnostic that would have caught
-    exp005's ~80%-blocked over-filtering before it reached a full run."""
-    if not regime:
+@dataclass(frozen=True)
+class RegimeDecision:
+    state: RegimeState | None
+    source_date: date | None
+    blocking_reason: str | None
+
+
+def regime_decision(
+    regime: dict[date, RegimeState] | None,
+    decision_date: date,
+    refresh_error: str | None = None,
+) -> RegimeDecision:
+    """Entry gate result for a UTC decision date. None deliberately disables it."""
+    if regime is None and refresh_error is None:
+        return RegimeDecision(None, None, None)
+    source_date = decision_date - timedelta(days=1)
+    present = isinstance(regime, dict) and decision_date in regime
+    state = regime.get(decision_date) if isinstance(regime, dict) else None
+    if not isinstance(state, RegimeState):
+        state = None
+    if refresh_error:
+        return RegimeDecision(state, source_date, refresh_error)
+    if state is None:
+        return RegimeDecision(None, source_date,
+                              "classification_invalid" if present else "classification_unavailable")
+    if state == RegimeState.RISK_OFF:
+        return RegimeDecision(state, source_date, "risk_off")
+    return RegimeDecision(state, source_date, None)
+
+
+def utc_date(ts):
+    """Calendar date of *ts* in UTC. Naive datetimes are treated as already
+    UTC (matching build_causal_regime's own bars, whose timestamps carry no
+    tzinfo but are UTC by construction) rather than being interpreted as
+    local time, which .astimezone() would otherwise silently do."""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC).date()
+
+
+def build_causal_regime(
+    bars: list[OHLCVBar], candidate: str,
+) -> dict[date, RegimeState]:
+    """Classify complete BTC UTC days for entries on the *following* day.
+
+    Hourly candle timestamps denote candle open. A day is complete only
+    after all 24 hourly candles exist with finite positive closes. Missing
+    or invalid days reset the consecutive-history warm-up; no decision is
+    emitted until the candidate's full history is available again.
+    """
+    if candidate not in REGIME_FUNCTIONS:
+        raise ValueError(
+            f"Unknown regime candidate: {candidate!r}. Choices: {sorted(REGIME_FUNCTIONS)}"
+        )
+    required_days = {"r1_sma200": 200, "r2_hysteresis_cross": 200,
+                     "r3_vol_percentile": 60, "r4_composite": 200}[candidate]
+    daily_hours: dict[date, dict[int, float]] = {}
+    invalid_days: set[date] = set()
+    for bar in bars:
+        ts = bar.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        ts = ts.astimezone(UTC)
+        day = utc_date(ts)
+        if (ts.minute or ts.second or ts.microsecond
+                or not math.isfinite(bar.close) or bar.close <= 0):
+            invalid_days.add(day)
+            continue
+        hours = daily_hours.setdefault(day, {})
+        if ts.hour in hours:
+            invalid_days.add(day)
+        hours[ts.hour] = bar.close
+
+    decisions: dict[date, RegimeState] = {}
+    streak: list[tuple[date, float]] = []
+
+    def flush() -> None:
+        if len(streak) < required_days:
+            return
+        states = REGIME_FUNCTIONS[candidate](streak)
+        for index in range(required_days - 1, len(streak)):
+            day = streak[index][0]
+            decisions[day + timedelta(days=1)] = states[day]
+
+    previous: date | None = None
+    for day in sorted(set(daily_hours) | invalid_days):
+        hours = daily_hours.get(day, {})
+        if (day in invalid_days or len(hours) != 24
+                or (previous is not None and day != previous + timedelta(days=1))):
+            flush()
+            streak = []
+        previous = day
+        if day in invalid_days or len(hours) != 24:
+            continue
+        streak.append((day, hours[23]))
+    flush()
+    return decisions
+
+
+def days_blocked_pct(regime: dict[date, RegimeState], days: set[date]) -> float:
+    """% of *days* RISK_OFF or unclassified — the diagnostic that would
+    have caught exp005's ~80%-blocked over-filtering before it reached a
+    full run. *days* must be the actual days scored (not regime's own
+    keys): a day missing from *regime* still blocks entries exactly like
+    RISK_OFF (matches backtest.experiment._compute_metrics), so an empty
+    or gapped regime over a non-empty *days* set is NOT 0% blocked."""
+    if not days:
         return 0.0
-    blocked = sum(1 for s in regime.values() if s == RegimeState.RISK_OFF)
-    return blocked / len(regime) * 100
+    blocked = sum(1 for d in days if regime.get(d) != RegimeState.RISK_ON)
+    return blocked / len(days) * 100

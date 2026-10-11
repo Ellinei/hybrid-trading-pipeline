@@ -56,3 +56,8 @@ trades_*.csv
 
 # Precomputed walk-forward probability caches (large pickle files)
 cache/
+
+# Local operational history and simulated accounts (including WAL sidecars)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

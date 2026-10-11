@@ -126,7 +126,9 @@ def _monthly_pf_figure(windows: list[dict]) -> go.Figure:
         fig.add_trace(go.Bar(
             x=[w["month"] for w in windows], y=capped_pf, marker_color=colors,
             customdata=[[w["trade_count"], w["profit_factor"]] for w in windows],
-            hovertemplate="%{x}<br>PF %{customdata[1]:.2f} (%{customdata[0]} trades)<extra></extra>",
+            hovertemplate=(
+                "%{x}<br>PF %{customdata[1]:.2f} (%{customdata[0]} trades)<extra></extra>"
+            ),
         ))
         fig.add_hline(y=1.0, line_dash="dash", line_color=_BASELINE)
     fig.update_layout(**_base_layout(height=320))

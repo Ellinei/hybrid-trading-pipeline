@@ -7,7 +7,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,11 +22,11 @@ def _make_signal(direction=SignalDirection.BUY, confidence=0.9, symbol="BTCUSDT"
         direction=direction,
         confidence=confidence,
         symbol=symbol,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         signals=[
-            Signal(direction, confidence, "technical", symbol, datetime.now(timezone.utc)),
-            Signal(direction, confidence, "ml", symbol, datetime.now(timezone.utc)),
-            Signal(direction, confidence, "sentiment", symbol, datetime.now(timezone.utc)),
+            Signal(direction, confidence, "technical", symbol, datetime.now(UTC)),
+            Signal(direction, confidence, "ml", symbol, datetime.now(UTC)),
+            Signal(direction, confidence, "sentiment", symbol, datetime.now(UTC)),
         ],
         reasoning="test",
         weights_used={},
@@ -47,7 +47,8 @@ def _symbol_info(step_size="0.0001", min_qty="0.0001", tick_size="0.01", min_not
         "symbol": "BTCUSDT",
         "filters": [
             {"filterType": "LOT_SIZE", "stepSize": step_size, "minQty": min_qty, "maxQty": "9000"},
-            {"filterType": "PRICE_FILTER", "tickSize": tick_size, "minPrice": "0.01", "maxPrice": "1000000"},
+            {"filterType": "PRICE_FILTER", "tickSize": tick_size,
+             "minPrice": "0.01", "maxPrice": "1000000"},
             {"filterType": "MIN_NOTIONAL", "minNotional": min_notional},
         ],
     }
@@ -78,7 +79,7 @@ class _FakeConn:
             )
         elif "INSERT INTO raw.trades" in sql:
             result.fetchone.return_value = MagicMock(
-                _mapping={"id": 1, "executed_at": datetime.now(timezone.utc)}
+                _mapping={"id": 1, "executed_at": datetime.now(UTC)}
             )
         else:
             result.scalar.return_value = self.scalar_value
@@ -445,7 +446,8 @@ class TestBuyEntryWithOCO:
             "symbol": "BTCUSDT",
             "executedQty": "2.6666",
             "fills": [
-                {"price": "100.0", "qty": "2.6666", "commission": "0.0026666", "commissionAsset": "BTC"}
+                {"price": "100.0", "qty": "2.6666",
+                 "commission": "0.0026666", "commissionAsset": "BTC"}
             ],
         }
         client.client.create_oco_order.return_value = {"orderListId": 12345}
@@ -466,7 +468,9 @@ class TestBuyEntryWithOCO:
         insert_params = next(p for sql, p in conn.calls if "INSERT INTO raw.trades" in sql)
         assert insert_params["oco_order_list_id"] == 12345
 
-    def test_oco_failure_after_fill_logs_critical_and_records_unprotected_open_trade(self, monkeypatch):
+    def test_oco_failure_after_fill_logs_critical_and_records_unprotected_open_trade(
+        self, monkeypatch,
+    ):
         monkeypatch.setenv("LIVE_ORDERS_ENABLED", "true")
         client = self._client()
         client.client.create_oco_order.side_effect = Exception("exchange rejected OCO")
@@ -547,7 +551,8 @@ class TestSellCloseUsesActualHeldQuantity:
         client.get_current_price.return_value = 110.0
         client.client.order_market_sell.return_value = {
             "symbol": "BTCUSDT", "executedQty": "0.05",
-            "fills": [{"price": "110.0", "qty": "0.05", "commission": "0.0", "commissionAsset": "USDT"}],
+            "fills": [{"price": "110.0", "qty": "0.05",
+                       "commission": "0.0", "commissionAsset": "USDT"}],
         }
         engine, conn = _make_fake_engine(open_trade_row=self._open_trade_row())
         risk = _make_approved_risk(client, engine, has_open_position=True)
@@ -587,7 +592,9 @@ class TestSellCloseUsesActualHeldQuantity:
         risk = _make_approved_risk(client, engine, has_open_position=True)
         executor = TradeExecutor(client=client, risk_manager=risk, db_engine=engine)
 
-        result = executor.execute_signal(_make_signal(direction=SignalDirection.SELL), dry_run=False)
+        result = executor.execute_signal(
+            _make_signal(direction=SignalDirection.SELL), dry_run=False,
+        )
 
         client.client.order_market_sell.assert_not_called()
         assert result["status"] == "closed_externally"
@@ -621,7 +628,9 @@ class TestSellCloseUsesActualHeldQuantity:
         risk = _make_approved_risk(client, engine, has_open_position=True)
         executor = TradeExecutor(client=client, risk_manager=risk, db_engine=engine)
 
-        result = executor.execute_signal(_make_signal(direction=SignalDirection.SELL), dry_run=False)
+        result = executor.execute_signal(
+            _make_signal(direction=SignalDirection.SELL), dry_run=False,
+        )
 
         assert result["pnl"] == pytest.approx(20.0)
 
@@ -652,7 +661,7 @@ class TestCloseExpiredPositions:
         return {
             "id": 7, "symbol": "BTCUSDT", "quantity": 0.05, "entry_price": 100.0,
             "oco_order_list_id": oco_order_list_id,
-            "executed_at": datetime.now(timezone.utc) - timedelta(hours=hours_old),
+            "executed_at": datetime.now(UTC) - timedelta(hours=hours_old),
         }
 
     def test_max_hold_bars_zero_disables_time_stop_no_db_touch(self):
@@ -737,7 +746,7 @@ class TestCloseExpiredPositions:
         engine, conn = _make_fake_engine(expired_rows=[self._expired_row()])
         executor = TradeExecutor(client=client, risk_manager=MagicMock(), db_engine=engine)
 
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         executor.close_expired_positions(max_hold_bars=24)
 
         select_params = next(p for sql, p in conn.calls if "executed_at <=" in sql)

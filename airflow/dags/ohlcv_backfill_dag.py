@@ -1,11 +1,8 @@
-"""Daily incremental OHLCV backfill from Binance REST API.
-
-Runs at 00:05 UTC, just before the dbt DAG at 00:15 UTC.
-Operates on the last 2 days to catch any gaps without re-fetching full history.
-"""
+"""Hourly completed-candle backfill and validated technical features."""
 from __future__ import annotations
 
 import os
+import subprocess
 from datetime import datetime, timedelta
 
 from airflow import DAG
@@ -20,31 +17,54 @@ default_args = {
 }
 
 
-def _run_backfill() -> None:
-    # Override host/port for the docker-internal network — the env vars in
-    # docker-compose point to postgres:5432, but explicitly set them here so
-    # this function works even if someone calls it outside Airflow.
+def _refresh() -> None:
+    """Keep one DB session lock for backfill, dbt build, and publication."""
     os.environ.setdefault("POSTGRES_HOST", "postgres")
     os.environ.setdefault("POSTGRES_PORT", "5432")
 
+    from ingestion.feature_validation import (
+        build_validation_engine,
+        configured_symbols,
+        feature_refresh_lock,
+        mark_features_invalid,
+        mark_features_valid,
+    )
     from ingestion.rest_backfill import run_backfill
 
-    symbols_raw = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
-    symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
-    run_backfill(symbols=symbols, days=2, interval="1h")
+    symbols = configured_symbols()
+    engine = build_validation_engine()
+    try:
+        with feature_refresh_lock(engine):
+            generation = mark_features_invalid(engine, symbols)
+            run_backfill(
+                symbols=symbols, days=2, interval="1h", source="mainnet",
+                invalidate_features=False,
+            )
+            dbt_dir = "/opt/airflow/dbt"
+            subprocess.run(
+                ["dbt", "deps", "--profiles-dir", dbt_dir],
+                cwd=dbt_dir, check=True,
+            )
+            # dbt build executes model tests and raises on any test failure.
+            subprocess.run(
+                ["dbt", "build", "--profiles-dir", dbt_dir],
+                cwd=dbt_dir, check=True,
+            )
+            mark_features_valid(engine, generation, symbols)
+    finally:
+        engine.dispose()
 
 
 with DAG(
-    dag_id="ohlcv_backfill",
+    dag_id="ohlcv_feature_refresh",
     default_args=default_args,
-    description="Daily incremental OHLCV backfill from Binance",
-    schedule="5 0 * * *",
+    description="Hourly completed Binance candles and validated dbt features",
+    schedule="5 * * * *",
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    tags=["ingestion", "binance"],
+    max_active_runs=1,
+    tags=["ingestion", "binance", "dbt"],
 ) as dag:
-
-    backfill_task = PythonOperator(
-        task_id="run_ohlcv_backfill",
-        python_callable=_run_backfill,
+    refresh_task = PythonOperator(
+        task_id="refresh_ohlcv_and_features", python_callable=_refresh,
     )

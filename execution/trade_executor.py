@@ -13,7 +13,7 @@ OCO first so the manual sell isn't blocked by locked balance.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import text
@@ -221,22 +221,29 @@ class TradeExecutor:
         self, signal: AggregatedSignal, dry_run: bool = False
     ) -> dict | None:
         """Validate → dispatch to entry or close. None if rejected or on error."""
+        self.last_decision = {"outcome": "rejected", "reason": "execution declined"}
+        if signal.direction == SignalDirection.HOLD:
+            return self._reject("signal is HOLD", "hold")
         try:
             price = self.client.get_current_price(signal.symbol)
         except Exception as exc:
             log.error("price_fetch_failed", symbol=signal.symbol, error=str(exc))
-            return None
+            return self._reject("price fetch failed", "error")
 
         approved, reason = self.risk.approve_trade(signal, price)
         if not approved:
             log.info("trade_rejected", symbol=signal.symbol, reason=reason,
                      direction=signal.direction.value, confidence=signal.confidence)
-            return None
+            return self._reject(reason)
 
         if signal.direction == SignalDirection.BUY:
             return self._execute_buy_entry(signal, price, dry_run)
         # approve_trade already rejected SELL with no open position.
         return self._execute_sell_close(signal, price, dry_run)
+
+    def _reject(self, reason, outcome="rejected"):
+        self.last_decision = {"outcome": outcome, "reason": reason}
+        return None
 
     def _execute_buy_entry(
         self, signal: AggregatedSignal, price: float, dry_run: bool
@@ -245,7 +252,7 @@ class TradeExecutor:
         balance = self.risk.get_account_balance()
         if balance is None:
             log.error("balance_unavailable_after_approval", symbol=signal.symbol)
-            return None
+            return self._reject("account balance unavailable", "error")
 
         info    = self.client.get_symbol_info_cached(signal.symbol)
         filters = parse_symbol_filters(info)
@@ -255,7 +262,7 @@ class TradeExecutor:
         if qty <= 0:
             log.info("trade_rejected", symbol=signal.symbol,
                      reason="qty rounds to 0 after LOT_SIZE filter")
-            return None
+            return self._reject("quantity rounds to zero after LOT_SIZE filter")
 
         stop_loss, take_profit = self.risk.calculate_stops(price, atr)
         stop_loss   = round_price_to_tick(stop_loss, filters)
@@ -266,7 +273,7 @@ class TradeExecutor:
             validate_notional(qty, price, filters)
         except FilterViolation as exc:
             log.info("trade_rejected", symbol=signal.symbol, reason=str(exc))
-            return None
+            return self._reject(str(exc))
 
         tech, ml, sent = self._get_sub_signals(signal)
 
@@ -280,7 +287,7 @@ class TradeExecutor:
 
         if not self.live_orders_enabled:
             log.warning("live_orders_disabled", symbol=signal.symbol)
-            return None
+            return self._reject("live orders disabled")
 
         try:
             buy_resp = self.client.client.order_market_buy(
@@ -288,7 +295,7 @@ class TradeExecutor:
             )
         except Exception as exc:
             log.error("buy_order_failed", symbol=signal.symbol, error=str(exc))
-            return None
+            return self._reject("buy order failed", "error")
 
         filled_qty, avg_fill_price = self._parse_fill(buy_resp, qty, price)
         sell_qty = round_qty_down(filled_qty, filters)
@@ -333,7 +340,7 @@ class TradeExecutor:
         open_trade = self._get_open_trade(signal.symbol)
         if open_trade is None:
             log.error("sell_close_no_open_trade", symbol=signal.symbol)
-            return None
+            return self._reject("no open position to close")
         return self._close_open_trade(signal.symbol, open_trade, price, dry_run,
                                        close_reason="signal_close")
 
@@ -361,7 +368,7 @@ class TradeExecutor:
 
         if not self.live_orders_enabled:
             log.warning("live_orders_disabled", symbol=symbol)
-            return None
+            return self._reject("live orders disabled")
 
         if order_list_id is not None:
             try:
@@ -384,7 +391,7 @@ class TradeExecutor:
             )
         except Exception as exc:
             log.error("sell_close_order_failed", symbol=symbol, error=str(exc))
-            return None
+            return self._reject("sell order failed", "error")
 
         _, avg_exit_price = self._parse_fill(sell_resp, qty, price)
         return self._close_trade(open_trade["id"], entry_price, avg_exit_price, qty,
@@ -404,7 +411,7 @@ class TradeExecutor:
         if max_hold_bars <= 0:
             return []
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_hold_bars)
+        cutoff = datetime.now(UTC) - timedelta(hours=max_hold_bars)
         with self.engine.connect() as conn:
             rows = conn.execute(_SELECT_EXPIRED_OPEN_TRADES, {"cutoff": cutoff}).fetchall()
 
@@ -419,5 +426,6 @@ class TradeExecutor:
             result = self._close_open_trade(trade["symbol"], trade, price, dry_run,
                                              close_reason="time_stop")
             if result is not None:
+                result["symbol"] = trade["symbol"]
                 closed.append(result)
         return closed

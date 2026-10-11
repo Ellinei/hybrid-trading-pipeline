@@ -5,8 +5,7 @@ isolation from the data loading and engine.
 """
 from __future__ import annotations
 
-import itertools
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from backtest.exit_simulation import OHLCVBar
 from backtest.sweep import PARAM_GRID, _CachingAggregator, _grid_configs, _row
@@ -123,10 +122,10 @@ class TestCachingAggregator:
         )
 
     def test_populate_calls_real_aggregator_once_per_key(self):
-        from unittest.mock import MagicMock
         from datetime import timedelta
+        from unittest.mock import MagicMock
 
-        ts1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts1 = datetime(2026, 1, 1, tzinfo=UTC)
         ts2 = ts1 + timedelta(hours=1)
         bars = {
             "BTCUSDT": [
@@ -146,7 +145,7 @@ class TestCachingAggregator:
     def test_aggregate_returns_cached_result_without_calling_real(self):
         from unittest.mock import MagicMock
 
-        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts = datetime(2026, 1, 1, tzinfo=UTC)
         expected_signal = self._make_signal("BTCUSDT", ts)
 
         real = MagicMock()
@@ -163,7 +162,7 @@ class TestCachingAggregator:
     def test_fallback_when_key_not_cached(self):
         from unittest.mock import MagicMock
 
-        ts = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        ts = datetime(2026, 6, 1, tzinfo=UTC)
         expected = self._make_signal("ETHUSDT", ts)
 
         real = MagicMock()

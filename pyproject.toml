@@ -41,6 +41,16 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "N", "UP", "B", "SIM"]
+# N806: uppercase matrix names (X, X_train, X_scaled) follow the sklearn convention.
+ignore = ["N806"]
+
+[tool.ruff.lint.per-file-ignores]
+# N803: @patch decorators inject mocks named after the class they replace (MockClient).
+# SIM117: nested `with pytest.raises(...)` keeps the expected error visually separate
+# from the code under test.
+"tests/**" = ["N803", "SIM117"]
+# N818: FilterViolation is part of the execution API; renaming it would touch callers.
+"execution/exchange_filters.py" = ["N818"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

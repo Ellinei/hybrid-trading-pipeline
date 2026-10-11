@@ -10,15 +10,34 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from config.strategy import StrategyConfig
+from execution import bot_runner
 from execution.bot_runner import (
-    build_aggregator, build_risk_manager, resolve_regime, run_loop, run_once,
+    build_aggregator,
+    build_market_data_client,
+    build_risk_manager,
+    initial_regime,
+    resolve_regime,
+    run_loop,
+    run_once,
 )
+
+
+class TestMarketDataClient:
+    @patch("execution.bot_runner.BinanceClientWrapper")
+    def test_paper_uses_public_mainnet_quotes(self, wrapper):
+        build_market_data_client(paper=True)
+        wrapper.assert_called_once_with(testnet=False)
+
+    @patch("execution.bot_runner.BinanceClientWrapper")
+    def test_live_uses_configured_exchange(self, wrapper):
+        build_market_data_client(paper=False)
+        wrapper.assert_called_once_with()
 
 
 # ===========================================================================
@@ -93,7 +112,7 @@ class TestResolveRegime:
         from signals.regime import RegimeState
 
         bars = [
-            OHLCVBar(timestamp=datetime(2026, 1, d, tzinfo=timezone.utc),
+            OHLCVBar(timestamp=datetime(2026, 1, d, tzinfo=UTC),
                      open=100.0, high=101.0, low=99.0, close=100.0)
             for d in range(1, 5)
         ]
@@ -112,6 +131,53 @@ class TestResolveRegime:
         with patch("backtest.run_backtest._load_bars", return_value=[]):
             with pytest.raises(ValueError):
                 resolve_regime(MagicMock(), cfg)
+
+
+# ===========================================================================
+# initial_regime — startup-only resolution. Unlike the per-cycle refresh in
+# run_once, there is no earlier successful state to fall back to here, so a
+# DB failure must degrade to enabled-but-unavailable ({}) rather than
+# raising and aborting the process before close_expired_positions ever runs.
+# ===========================================================================
+
+class TestInitialRegime:
+    def test_disabled_gate_returns_none_without_touching_db(self):
+        cfg = StrategyConfig(regime_candidate=None)
+        engine = MagicMock()
+
+        regime, error = initial_regime(engine, cfg)
+
+        assert regime is None
+        assert error is None
+        engine.connect.assert_not_called()
+
+    def test_success_returns_regime_map_and_no_error(self):
+        cfg = StrategyConfig(regime_candidate="r1_sma200")
+        fresh_regime = {"some": "map"}
+
+        with patch("execution.bot_runner.resolve_regime", return_value=fresh_regime):
+            regime, error = initial_regime(MagicMock(), cfg)
+
+        assert regime == fresh_regime
+        assert error is None
+
+    def test_db_failure_returns_empty_dict_not_none(self):
+        """{} (enabled-but-unavailable) still blocks BUY; None would
+        deliberately disable the gate and open it — the unsafe direction."""
+        cfg = StrategyConfig(regime_candidate="r1_sma200")
+
+        with patch("execution.bot_runner.resolve_regime", side_effect=RuntimeError("db down")):
+            regime, error = initial_regime(MagicMock(), cfg)
+
+        assert regime == {}
+        assert regime is not None
+        assert error == "refresh_failed"
+
+    def test_unknown_candidate_raises_before_any_query(self):
+        engine = MagicMock()
+        with pytest.raises(ValueError, match="Unknown regime candidate"):
+            initial_regime(engine, StrategyConfig(regime_candidate="not_a_real_candidate"))
+        engine.connect.assert_not_called()
 
 
 # ===========================================================================
@@ -189,13 +255,14 @@ class TestRunOnceRegimeRefresh:
             lambda *a, **k: call_order.append(("aggregate", aggregator._regime)) or MagicMock()
         )
 
-        with patch("execution.bot_runner.resolve_regime", return_value=fresh_regime) as mock_resolve:
+        with patch("execution.bot_runner.resolve_regime",
+                   return_value=fresh_regime) as mock_resolve:
             run_once(["BTCUSDT"], executor, aggregator, engine=engine, strategy_cfg=cfg)
 
         mock_resolve.assert_called_once_with(engine, cfg)
         assert call_order == [("aggregate", fresh_regime)]
 
-    def test_regime_refresh_failure_keeps_previous_regime_and_does_not_block_cycle(self):
+    def test_regime_refresh_failure_blocks_entries_and_does_not_block_cycle(self):
         executor = MagicMock()
         aggregator = MagicMock()
         aggregator._regime = {"previous": "regime"}
@@ -206,7 +273,47 @@ class TestRunOnceRegimeRefresh:
             run_once(["BTCUSDT"], executor, aggregator, engine=engine, strategy_cfg=cfg)
 
         assert aggregator._regime == {"previous": "regime"}
+        assert aggregator._regime_refresh_error == "refresh_failed"
         aggregator.aggregate.assert_called_once()
+
+    def test_regime_refresh_recovery_clears_failure(self):
+        from signals.regime import RegimeState
+
+        executor = MagicMock()
+        aggregator = MagicMock()
+        aggregator._regime_refresh_error = "refresh_failed"
+        engine = MagicMock()
+        cfg = StrategyConfig(regime_candidate="r1_sma200")
+        fresh = {datetime(2026, 7, 11).date(): RegimeState.RISK_ON}
+
+        with patch("execution.bot_runner.resolve_regime", return_value=fresh):
+            run_once(["ETHUSDT"], executor, aggregator, engine=engine, strategy_cfg=cfg)
+
+        assert aggregator._regime is fresh
+        assert aggregator._regime_refresh_error is None
+
+    def test_refresh_failure_still_processes_time_stop_and_sell(self):
+        from signals.base import AggregatedSignal, SignalDirection
+
+        executor = MagicMock()
+        executor.close_expired_positions.return_value = [
+            {"symbol": "BTCUSDT", "close_reason": "time_stop"},
+        ]
+        aggregator = MagicMock()
+        aggregator.aggregate.return_value = AggregatedSignal(
+            SignalDirection.SELL, 0.4, "ETHUSDT", datetime.now(UTC), [], "sell", {},
+        )
+        journal = MagicMock()
+        journal.record.return_value = True
+        cfg = StrategyConfig(regime_candidate="r1_sma200")
+
+        with patch("execution.bot_runner.resolve_regime", side_effect=RuntimeError("db gone")):
+            run_once(["ETHUSDT"], executor, aggregator, engine=MagicMock(),
+                     strategy_cfg=cfg, journal=journal, max_hold_bars=24)
+
+        executor.close_expired_positions.assert_called_once()
+        executor.execute_signal.assert_called_once()
+        assert aggregator._regime_refresh_error == "refresh_failed"
 
     def test_no_engine_or_cfg_skips_regime_refresh(self):
         """Backward compatible: callers that don't pass engine/strategy_cfg
@@ -287,7 +394,7 @@ class TestRunLoopPassesMaxHoldBarsThrough:
 
         mock_run_once.assert_called_once_with(
             ["BTCUSDT"], executor, aggregator, dry_run=False, max_hold_bars=24,
-            engine=None, strategy_cfg=None, heartbeat=None,
+            engine=None, strategy_cfg=None, heartbeat=None, freshness=None, journal=None,
         )
 
     def test_run_loop_forwards_engine_and_strategy_cfg_for_per_cycle_regime_refresh(self):
@@ -315,3 +422,63 @@ class TestRunLoopPassesMaxHoldBarsThrough:
 
         _, kwargs = mock_run_once.call_args
         assert kwargs["heartbeat"] is heartbeat
+
+
+# ===========================================================================
+# main() — end-to-end wiring, everything mocked (no DB/network). Proves a
+# startup regime DB failure (Task 1's bug: resolve_regime raising before
+# run_once existed used to abort the process before close_expired_positions
+# could run) now still reaches run_once with an enabled-but-unavailable
+# regime, instead of crashing before exit processing has a chance to run.
+# ===========================================================================
+
+class TestMainStartupRegimeFailure:
+    def test_startup_db_failure_still_reaches_run_once(self):
+        with patch("execution.bot_runner.create_engine") as mock_create_engine, \
+             patch("execution.bot_runner.build_market_data_client"), \
+             patch("execution.bot_runner.resolve_regime", side_effect=RuntimeError("db down")), \
+             patch("execution.bot_runner.build_aggregator") as mock_build_aggregator, \
+             patch("execution.bot_runner.build_risk_manager"), \
+             patch("execution.bot_runner.TradeExecutor"), \
+             patch("execution.bot_runner.HeartbeatRecorder"), \
+             patch("execution.bot_runner.FreshnessMonitor"), \
+             patch("execution.bot_runner.DecisionJournal"), \
+             patch("execution.bot_runner.run_once") as mock_run_once:
+            aggregator = mock_build_aggregator.return_value
+
+            bot_runner.main(["--once", "--dry-run"])
+
+        mock_run_once.assert_called_once()
+        _, kwargs = mock_run_once.call_args
+        assert kwargs["dry_run"] is True
+        assert kwargs["engine"] is mock_create_engine.return_value
+        # build_aggregator is called with the enabled-but-unavailable ({})
+        # regime, not None (which would have opened the gate instead).
+        assert mock_build_aggregator.call_args[0][2] == {}
+        assert aggregator._regime_refresh_error == "refresh_failed"
+        mock_create_engine.return_value.dispose.assert_called_once()
+
+
+# ===========================================================================
+# main() — Task 2: every setup step used to run BEFORE the try/finally that
+# disposes the engine, so a construction failure partway through (e.g.
+# PaperStore finding its sqlite file locked by another bot) leaked the
+# engine. The try/finally now starts right after engine construction.
+# ===========================================================================
+
+class TestMainSetupFailureStillDisposesEngine:
+    def test_paper_store_construction_failure_still_disposes_engine_and_reraises(self):
+        import sqlite3
+
+        with patch("execution.bot_runner.create_engine") as mock_create_engine, \
+             patch("execution.bot_runner.build_market_data_client"), \
+             patch("execution.bot_runner.resolve_regime", return_value={}), \
+             patch("execution.bot_runner.build_aggregator"), \
+             patch("execution.paper.PaperStore",
+                   side_effect=sqlite3.OperationalError("database is locked")), \
+             patch("execution.bot_runner.run_once") as mock_run_once:
+            with pytest.raises(sqlite3.OperationalError):
+                bot_runner.main(["--once", "--paper"])
+
+        mock_create_engine.return_value.dispose.assert_called_once()
+        mock_run_once.assert_not_called()

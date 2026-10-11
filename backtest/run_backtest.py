@@ -15,13 +15,13 @@ import json
 import os
 import pickle
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import quote_plus
 
 import pandas as pd
 import structlog
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 
 from backtest import data_store
 from backtest.engine import BacktestConfig, BacktestResult, _load_all_features, run_backtest
@@ -40,6 +40,9 @@ from signals.ml_model import MLSignalGenerator
 from signals.technical import TechnicalSignalGenerator
 
 log = structlog.get_logger()
+PROB_CACHE_ALGORITHM_VERSION = 3  # v3: train_in_memory's GridSearchCV tuning path now uses
+                                  # causal time-grouped + label-reveal-purged CV folds instead
+                                  # of a naive TimeSeriesSplit over symbol-grouped row order
 
 
 def _load_bars(engine, symbol: str, start: datetime | None, end: datetime | None) -> list[OHLCVBar]:
@@ -59,7 +62,9 @@ def _load_bars(engine, symbol: str, start: datetime | None, end: datetime | None
     ]
 
 
-def _load_atr(engine, symbol: str, start: datetime | None, end: datetime | None) -> dict[datetime, float]:
+def _load_atr(
+    engine, symbol: str, start: datetime | None, end: datetime | None,
+) -> dict[datetime, float]:
     df = data_store.load_features(engine, symbol)
     if df.empty:
         return {}
@@ -74,22 +79,12 @@ def _load_atr(engine, symbol: str, start: datetime | None, end: datetime | None)
     }
 
 
-def _feature_fingerprint(engine, symbols: list[str]) -> dict[str, tuple[int, str | None]]:
-    """Cheap per-symbol (row_count, max_timestamp) snapshot of feat_technical.
-
-    Used as a proxy for "has the underlying feature data changed since a
-    prob cache was built" without re-reading the whole table — a count(*)
-    and max(timestamp) aggregate query rather than the full feature load.
-    """
-    fingerprint: dict[str, tuple[int, str | None]] = {}
-    for symbol in symbols:
-        query = text(
-            "SELECT COUNT(*), MAX(timestamp) FROM features.feat_technical WHERE symbol = :symbol"
-        )
-        with engine.connect() as conn:
-            count, max_ts = conn.execute(query, {"symbol": symbol}).fetchone()
-        fingerprint[symbol] = (count, str(max_ts) if max_ts is not None else None)
-    return fingerprint
+def _feature_fingerprint(engine, symbols: list[str]) -> dict[str, tuple[int, str | None, str]]:
+    """Per-symbol content fingerprints, including in-place feature corrections."""
+    return {
+        symbol: data_store._fingerprint_symbol(engine, "features.feat_technical", symbol)
+        for symbol in symbols
+    }
 
 
 def _compute_cache_key(
@@ -100,7 +95,9 @@ def _compute_cache_key(
     walk_forward_months: int,
     train_window_days: int,
     symbols: list[str],
-    fingerprint: dict[str, tuple[int, str | None]],
+    fingerprint: dict[str, tuple],
+    algorithm_version: int | None = None,
+    bar_stream: list[tuple[datetime, str]] | None = None,
 ) -> str:
     """Content-addressed key over everything that determines what a prob
     cache SHOULD contain. Deliberately excludes tuned hyperparameters
@@ -117,6 +114,14 @@ def _compute_cache_key(
         "symbols": sorted(symbols),
         "fingerprint": {sym: list(fingerprint[sym]) for sym in sorted(fingerprint)},
     }
+    if algorithm_version is not None:
+        if bar_stream is None:
+            raise ValueError("Versioned probability caches require the training bar stream")
+        payload["algorithm_version"] = algorithm_version
+        payload["bar_stream"] = [
+            [ts.astimezone(UTC).isoformat(), symbol]
+            for ts, symbol in sorted(bar_stream)
+        ]
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -125,18 +130,66 @@ def _validate_cache_key(meta: dict, expected_key: str, force: bool) -> tuple[boo
     """Decide whether a --load-cache run may proceed.
 
     Returns (ok, message). ok=False means the caller should print message
-    and exit without running — a genuine mismatch (stale cache: symbols,
-    labels, schedule, or the underlying feature data changed) unless
-    *force* is set. A cache with no "cache_key" in its meta predates this
-    mechanism and is treated as unverifiable, not mismatched — it must not
-    hard-fail, or every already-built cache breaks on first use.
+    and exit without running.
+
+    A cache with no "cache_key", no "algorithm_version", or an
+    "algorithm_version" different from the current
+    PROB_CACHE_ALGORITHM_VERSION is REFUSED by default — it predates the
+    label-availability and causal-CV fixes (or was built under a since-
+    superseded algorithm) and cannot be trusted to reflect them; it must be
+    rebuilt with --cache-only. A genuine content-key mismatch (stale cache:
+    symbols, labels, schedule, or the underlying feature data changed) is
+    refused the same way. Every refusal here can be overridden with
+    *force*, which proceeds with a loud warning that results are not
+    comparable to a fresh build. This is an intentional tightening of the
+    previous behavior, which let a keyless/versionless cache through with
+    only a soft warning.
     """
     cached_key = meta.get("cache_key")
+    cached_version = meta.get("algorithm_version")
+
     if cached_key is None:
-        return True, (
-            "WARNING: cache has no content key (built by an older run) — "
-            "cannot verify it matches current symbols/labels/data; proceeding"
+        if force:
+            return True, (
+                "WARNING: cache has no content key (predates the label-availability "
+                "and CV fixes) — results are NOT comparable to a fresh build; "
+                "proceeding anyway (--force)"
+            )
+        return False, (
+            "ERROR: cache has no content key — it predates the label-availability "
+            "and CV fixes and must be rebuilt with --cache-only. Pass --force to "
+            "proceed anyway (results will not be comparable)."
         )
+
+    if cached_version is None:
+        if force:
+            return True, (
+                "WARNING: cache has no algorithm_version (predates the "
+                "label-availability and CV fixes) — results are NOT comparable to "
+                "a fresh build; proceeding anyway (--force)"
+            )
+        return False, (
+            "ERROR: cache has no algorithm_version — it predates the "
+            "label-availability and CV fixes and must be rebuilt with "
+            "--cache-only. Pass --force to proceed anyway (results will not be "
+            "comparable)."
+        )
+
+    if cached_version != PROB_CACHE_ALGORITHM_VERSION:
+        if force:
+            return True, (
+                f"WARNING: cache algorithm_version mismatch (cached={cached_version}, "
+                f"current={PROB_CACHE_ALGORITHM_VERSION}) — results are NOT "
+                f"comparable to a fresh build; proceeding anyway (--force)"
+            )
+        return False, (
+            f"ERROR: cache algorithm_version mismatch (cached={cached_version}, "
+            f"current={PROB_CACHE_ALGORITHM_VERSION}) — it predates fixes made in "
+            f"algorithm v{PROB_CACHE_ALGORITHM_VERSION} and must be rebuilt with "
+            f"--cache-only. Pass --force to proceed anyway (results will not be "
+            f"comparable)."
+        )
+
     if cached_key == expected_key:
         return True, ""
     if force:
@@ -156,6 +209,7 @@ def _validate_cache_key(meta: dict, expected_key: str, force: bool) -> tuple[boo
 def _build_cache_meta(
     engine, symbols: list[str], min_train_days: int,
     walk_forward_months: int, train_window_days: int,
+    bar_stream: list[tuple[datetime, str]] | None = None,
 ) -> dict:
     """Meta dict stored alongside a saved prob cache, including its
     content-addressed key (see _compute_cache_key)."""
@@ -167,6 +221,8 @@ def _build_cache_meta(
         "train_window_days": train_window_days,
         "symbols": symbols,
     }
+    if bar_stream is not None:
+        meta["algorithm_version"] = PROB_CACHE_ALGORITHM_VERSION
     meta["cache_key"] = _compute_cache_key(
         label_horizon=meta["label_horizon"],
         label_min_return=meta["label_min_return"],
@@ -175,6 +231,8 @@ def _build_cache_meta(
         train_window_days=train_window_days,
         symbols=symbols,
         fingerprint=_feature_fingerprint(engine, symbols),
+        algorithm_version=meta.get("algorithm_version"),
+        bar_stream=bar_stream,
     )
     return meta
 
@@ -288,7 +346,7 @@ def _print_prob_stats(
         monthly[month_key].append(prob)
 
     thr_header = "  ".join(f">={t:.2f}" for t in thresholds)
-    print(f"\n=== ML prob_up distribution by month ===")
+    print("\n=== ML prob_up distribution by month ===")
     print(f"  {'symbol':<10} {'month':<8}  {'n':>5}  {'max':>5}  {thr_header}")
     print(f"  {'-'*10} {'-'*8}  {'-'*5}  {'-'*5}  " + "  ".join("-"*6 for _ in thresholds))
 
@@ -314,11 +372,13 @@ def main() -> None:
                          help="ISO date (default: earliest available data per symbol)")
     parser.add_argument("--end", type=str, default=None,
                          help="ISO date (default: latest available data per symbol)")
-    parser.add_argument("--output", type=str, default=None, help="Optional CSV path for the trade log")
+    parser.add_argument("--output", type=str, default=None,
+                         help="Optional CSV path for the trade log")
     parser.add_argument("--walk-forward", type=int, default=0, metavar="MONTHS",
                          help="Enable walk-forward ML retraining every N months (0=disabled)")
     parser.add_argument("--min-train-days", type=int, default=60,
-                         help="Warm-up days before first model fit in walk-forward mode (default: 60)")
+                         help="Warm-up days before first model fit in walk-forward mode "
+                              "(default: 60)")
     parser.add_argument("--train-window-days", type=int, default=0,
                          help="Cap the walk-forward training window to a sliding N days "
                               "(0=expanding window over all history)")
@@ -347,7 +407,8 @@ def main() -> None:
     parser.add_argument("--prob-stats", action="store_true", default=False,
                          help="Diagnostic mode: precompute walk-forward ML prob_up distributions "
                               "per month and exit without running the full backtest simulation. "
-                              "Use with --walk-forward to match the retraining schedule of a real run.")
+                              "Use with --walk-forward to match the retraining schedule "
+                              "of a real run.")
     parser.add_argument("--save-cache", type=str, default=None, metavar="PATH",
                          help="After the walk-forward run, precompute prob_map+feature_df and "
                               "pickle them to PATH so subsequent sweeps can skip retraining")
@@ -355,8 +416,9 @@ def main() -> None:
                          help="Load precomputed prob_map+feature_df from PATH (no GridSearchCV); "
                               "combine with --bb-guard/--buy-gate/etc. for fast parameter sweeps")
     parser.add_argument("--cache-only", action="store_true", default=False,
-                         help="Precompute and save the walk-forward prob cache (--save-cache required) "
-                              "then exit — skips the full backtest simulation (~15 min vs ~50 min). "
+                         help="Precompute and save the walk-forward prob cache "
+                              "(--save-cache required) then exit — skips the full backtest "
+                              "simulation (~15 min vs ~50 min). "
                               "Use once to build the cache; then sweep variants with --load-cache.")
     parser.add_argument("--force", action="store_true", default=False,
                          help="With --load-cache: proceed even if the cache's content key doesn't "
@@ -379,10 +441,14 @@ def main() -> None:
     symbols = (
         [s.strip() for s in args.symbols.split(",") if s.strip()]
         if args.symbols else
-        [s.strip() for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
+        [
+            s.strip()
+            for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+            if s.strip()
+        ]
     )
-    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc) if args.start else None
-    end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else None
+    start = datetime.fromisoformat(args.start).replace(tzinfo=UTC) if args.start else None
+    end = datetime.fromisoformat(args.end).replace(tzinfo=UTC) if args.end else None
 
     client = BinanceClientWrapper()
     aggregator = SignalAggregator(
@@ -415,8 +481,8 @@ def main() -> None:
 
     config = BacktestConfig(
         symbols=symbols,
-        start=start or datetime(1970, 1, 1, tzinfo=timezone.utc),
-        end=end or datetime.now(timezone.utc),
+        start=start or datetime(1970, 1, 1, tzinfo=UTC),
+        end=end or datetime.now(UTC),
         risk_config=RiskConfig(max_hold_bars=args.max_hold_bars),
     )
 
@@ -424,7 +490,10 @@ def main() -> None:
     min_train_days = args.min_train_days
     feature_df = None
 
-    if (walk_forward > 0 or args.prob_stats or args.save_cache or args.cache_only) and not args.load_cache:
+    if (
+        (walk_forward > 0 or args.prob_stats or args.save_cache or args.cache_only)
+        and not args.load_cache
+    ):
         wf_months = walk_forward if walk_forward > 0 else 1
         print(f"\n  Walk-forward mode: ML retrain every {wf_months} month(s), "
               f"warm-up {min_train_days} day(s)")
@@ -465,6 +534,7 @@ def main() -> None:
         )
         _meta_co = _build_cache_meta(
             engine, symbols, min_train_days, _wf_co, args.train_window_days,
+            bar_stream=_bar_stream_co,
         )
         _cache_dir_co = os.path.dirname(args.save_cache)
         if _cache_dir_co:
@@ -504,6 +574,10 @@ def main() -> None:
             train_window_days=_meta.get("train_window_days", args.train_window_days),
             symbols=symbols,
             fingerprint=_feature_fingerprint(engine, symbols),
+            algorithm_version=_meta.get("algorithm_version"),
+            bar_stream=(sorted((bar.timestamp, sym) for sym in symbols
+                               for bar in bars_by_symbol.get(sym, []))
+                        if _meta.get("algorithm_version") is not None else None),
         )
         _ok, _msg = _validate_cache_key(_meta, _expected_key, args.force)
         if _msg:
@@ -564,6 +638,7 @@ def main() -> None:
         )
         _meta_cs = _build_cache_meta(
             engine, symbols, min_train_days, _wf_cs, args.train_window_days,
+            bar_stream=_bar_stream_cs,
         )
         _cache_dir = os.path.dirname(args.save_cache)
         if _cache_dir:

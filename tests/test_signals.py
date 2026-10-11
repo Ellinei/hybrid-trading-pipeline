@@ -7,13 +7,12 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from signals.base import AggregatedSignal, Signal, SignalDirection
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -64,7 +63,7 @@ def _signal(direction: SignalDirection, confidence: float, source: str) -> Signa
         confidence=confidence,
         source=source,
         symbol="BTCUSDT",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         metadata={},
     )
 
@@ -256,7 +255,7 @@ class TestTechnicalAsOf:
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
         conn.execute.return_value.fetchone.return_value = None
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
 
         TechnicalSignalGenerator(engine).get_latest_features("BTCUSDT", as_of=cutoff)
 
@@ -269,7 +268,7 @@ class TestTechnicalAsOf:
         from signals.technical import TechnicalSignalGenerator
 
         mock_feat.return_value = _features()
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
 
         signal = TechnicalSignalGenerator(MagicMock()).generate_signal("BTCUSDT", as_of=cutoff)
 
@@ -310,6 +309,7 @@ class TestMLSignal:
         """3-row DataFrame (< n_splits+1=6) → False; model stays None."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -326,6 +326,7 @@ class TestMLSignal:
         """Label is 1 only when forward return STRICTLY exceeds LABEL_MIN_RETURN:
         exactly at the hurdle → 0, just above → 1, below/negative → 0."""
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         hurdle = MLSignalGenerator.LABEL_MIN_RETURN
@@ -345,6 +346,7 @@ class TestMLSignal:
         """200 synthetic rows → True; in-memory model and scaler are set."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -370,6 +372,7 @@ class TestMLSignal:
         an 8-combo x 5-fold search each time."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -398,6 +401,7 @@ class TestMLSignal:
         frozen path itself doesn't need CV folds — the floor exists to avoid
         degenerate models, not just to satisfy TimeSeriesSplit."""
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -420,6 +424,7 @@ class TestMLSignal:
         in on every later walk-forward boundary."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -442,6 +447,7 @@ class TestMLSignal:
         need to re-read last_grid_params_ itself."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -465,6 +471,7 @@ class TestMLSignal:
         stays None so the NEXT boundary retries a full GridSearchCV instead
         of permanently reusing nothing."""
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -485,6 +492,7 @@ class TestMLSignal:
         precompute loop) can freeze and reuse them on subsequent windows."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -507,6 +515,7 @@ class TestMLSignal:
         oversubscribes cores and slows every fit down."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -526,6 +535,7 @@ class TestMLSignal:
         with, so the classifier itself should use all cores."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         gen = MLSignalGenerator(MagicMock())
@@ -553,6 +563,7 @@ class TestMLSignal:
         with near-zero CPU growth, had to be killed)."""
         import numpy as np
         import pandas as pd
+
         from signals.ml_model import MLSignalGenerator
 
         monkeypatch.setattr(MLSignalGenerator, "MODEL_PATH", str(tmp_path / "model.pkl"))
@@ -565,6 +576,9 @@ class TestMLSignal:
             columns=MLSignalGenerator.FEATURES,
         )
         df["target"] = (rng.random(200) > 0.5).astype(int)
+        df["symbol"] = "BTCUSDT"
+        df["timestamp"] = pd.date_range("2026-01-01", periods=200, freq="h", tz="UTC")
+        df["label_timestamp"] = pd.date_range("2026-01-01 08:00", periods=200, freq="h", tz="UTC")
 
         with patch.object(MLSignalGenerator, "load_training_data", return_value=df):
             gen.train(["BTCUSDT"])
@@ -598,7 +612,7 @@ class TestMLAsOf:
         conn = MagicMock()
         engine.connect.return_value.__enter__.return_value = conn
         conn.execute.return_value.fetchone.return_value = None
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
 
         MLSignalGenerator(engine).get_latest_features("BTCUSDT", as_of=cutoff)
 
@@ -610,7 +624,7 @@ class TestMLAsOf:
     def test_generate_signal_passes_as_of_through_as_timestamp_even_without_model(self, _):
         from signals.ml_model import MLSignalGenerator
 
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
         signal = MLSignalGenerator(MagicMock()).generate_signal("BTCUSDT", as_of=cutoff)
 
         assert signal.timestamp == cutoff
@@ -642,7 +656,7 @@ class TestSentimentSignal:
         ignored (always scores current live articles)."""
         from signals.sentiment import SentimentSignalGenerator
 
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
         with patch("signals.sentiment.feedparser.parse") as mock_parse:
             empty_feed = MagicMock()
             empty_feed.entries = []
@@ -676,7 +690,7 @@ class TestNeutralSentimentSignalGenerator:
         """No feedparser/network call — used when sentiment has no history."""
         from signals.sentiment import NeutralSentimentSignalGenerator
 
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
         signal = NeutralSentimentSignalGenerator().generate_signal("BTCUSDT", as_of=cutoff)
 
         assert signal.direction == SignalDirection.HOLD
@@ -803,7 +817,7 @@ class TestSignalAggregatorRegimeGate:
     def test_risk_off_blocks_a_buy(self):
         from signals.regime import RegimeState
 
-        as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        as_of = datetime(2026, 1, 1, tzinfo=UTC)
         agg = self._agg(regime={as_of.date(): RegimeState.RISK_OFF})
 
         result = agg.aggregate("BTCUSDT", as_of=as_of)
@@ -813,7 +827,7 @@ class TestSignalAggregatorRegimeGate:
     def test_risk_on_allows_a_buy(self):
         from signals.regime import RegimeState
 
-        as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        as_of = datetime(2026, 1, 1, tzinfo=UTC)
         agg = self._agg(regime={as_of.date(): RegimeState.RISK_ON})
 
         result = agg.aggregate("BTCUSDT", as_of=as_of)
@@ -830,7 +844,7 @@ class TestSignalAggregatorRegimeGate:
     def test_never_blocks_a_sell(self):
         from signals.regime import RegimeState
 
-        as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        as_of = datetime(2026, 1, 1, tzinfo=UTC)
         agg = self._agg(regime={as_of.date(): RegimeState.RISK_OFF})
         agg.technical.generate_signal.return_value = _signal(SignalDirection.SELL, 0.8, "technical")
         agg.ml.generate_signal.return_value = _signal(SignalDirection.SELL, 0.8, "ml")
@@ -883,7 +897,7 @@ class TestAggregatorAsOf:
 
     def test_as_of_set_passes_to_technical_and_ml_and_uses_neutral_sentiment(self):
         agg = self._agg_for_as_of()
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
 
         result = agg.aggregate("BTCUSDT", as_of=cutoff)
 
@@ -972,7 +986,7 @@ class TestSignalAggregatorSentimentEnabled:
         """as_of set already forces neutral sentiment regardless — confirm
         sentiment_enabled=False doesn't break that existing path."""
         agg = self._agg(sentiment_enabled=False)
-        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
 
         result = agg.aggregate("BTCUSDT", as_of=cutoff)
 

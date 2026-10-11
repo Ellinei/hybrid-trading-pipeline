@@ -1,7 +1,7 @@
 """Historical OHLCV backfill from Binance REST API into TimescaleDB.
 
-Idempotent: uses INSERT … ON CONFLICT (symbol, timestamp) DO NOTHING.
-Incremental: picks up from the latest stored timestamp for each symbol.
+Idempotent: corrects changed candle values on conflict.
+Incremental: refetches a 48-hour overlap to repair provisional rows and gaps.
 
 Usage (from project root):
     python -m ingestion.rest_backfill
@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -32,7 +32,22 @@ OHLCV_INSERT_SQL = """
         (symbol, timestamp, open, high, low, close,
          volume, quote_volume, trades, taker_buy_vol)
     VALUES %s
-    ON CONFLICT (symbol, timestamp) DO NOTHING
+    ON CONFLICT (symbol, timestamp) DO UPDATE SET
+        open = EXCLUDED.open,
+        high = EXCLUDED.high,
+        low = EXCLUDED.low,
+        close = EXCLUDED.close,
+        volume = EXCLUDED.volume,
+        quote_volume = EXCLUDED.quote_volume,
+        trades = EXCLUDED.trades,
+        taker_buy_vol = EXCLUDED.taker_buy_vol
+    WHERE (raw.ohlcv.open, raw.ohlcv.high, raw.ohlcv.low, raw.ohlcv.close,
+           raw.ohlcv.volume, raw.ohlcv.quote_volume, raw.ohlcv.trades,
+           raw.ohlcv.taker_buy_vol)
+          IS DISTINCT FROM
+          (EXCLUDED.open, EXCLUDED.high, EXCLUDED.low, EXCLUDED.close,
+           EXCLUDED.volume, EXCLUDED.quote_volume, EXCLUDED.trades,
+           EXCLUDED.taker_buy_vol)
 """
 
 
@@ -55,14 +70,14 @@ def _get_db_connection():
 
 
 def upsert_ohlcv_rows(conn, rows: list[dict[str, Any]]) -> int:
-    """Bulk-insert OHLCV rows with ON CONFLICT DO NOTHING.
+    """Insert OHLCV rows and repair differing values on conflict.
 
     Args:
         conn: psycopg2 connection.
         rows: list of dicts with keys matching OHLCV column names.
 
     Returns:
-        Number of rows inserted (0 when rows is empty or all conflicted).
+        Number of rows inserted or updated (0 when all values are unchanged).
     """
     if not rows:
         return 0
@@ -113,28 +128,32 @@ def backfill_symbol(
     days: int = 90,
     interval: str = "1h",
     no_incremental: bool = False,
+    now: datetime | None = None,
 ) -> int:
-    """Fetch and insert all missing candles for one symbol.
+    """Fetch completed candles, including a 48-hour repair overlap.
 
-    Returns total rows inserted across all chunks.
+    Returns rows inserted or updated across all chunks.
     """
     bound_log = log.bind(symbol=symbol, interval=interval)
 
+    snapshot = now or datetime.now(UTC)
+    if snapshot.tzinfo is None or snapshot.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
     latest = _get_latest_timestamp(conn, symbol)
     if latest and not no_incremental:
-        # Advance 1 ms past the last stored candle to avoid re-fetching it
-        chunk_start: datetime = latest + timedelta(milliseconds=1)
+        chunk_start: datetime = latest - timedelta(hours=48)
         bound_log.info("incremental_backfill", from_ts=str(chunk_start))
     else:
-        chunk_start = datetime.now(timezone.utc) - timedelta(days=days)
+        chunk_start = snapshot - timedelta(days=days)
         bound_log.info("full_backfill", from_ts=str(chunk_start), days=days)
 
     total_inserted = 0
 
-    while chunk_start < datetime.now(timezone.utc):
+    while chunk_start < snapshot:
         t0 = time.monotonic()
         df = client.fetch_ohlcv(
-            symbol, interval=interval, start_date=chunk_start, limit=1000
+            symbol, interval=interval, start_date=chunk_start,
+            end_date=snapshot, limit=1000, as_of=snapshot,
         )
 
         if df.empty:
@@ -152,10 +171,13 @@ def backfill_symbol(
             elapsed_s=round(elapsed, 2),
         )
 
-        # Advance past the last returned candle
-        chunk_start = (
+        # A stale or unordered page must never cause an endless request loop.
+        next_start = (
             df["timestamp"].max().to_pydatetime() + timedelta(milliseconds=1)
         )
+        if next_start <= chunk_start:
+            raise RuntimeError(f"{symbol} response did not advance the backfill cursor")
+        chunk_start = next_start
 
         if len(rows) < 1000:
             break  # No more historical data available
@@ -169,12 +191,37 @@ def run_backfill(
     interval: str = "1h",
     no_incremental: bool = False,
     source: str = "mainnet",
+    invalidate_features: bool = True,
 ) -> None:
     """Orchestrate full backfill: init DB, iterate symbols, print summary."""
     from sqlalchemy import create_engine
 
     from ingestion.binance_client import BinanceClientWrapper
+    from ingestion.feature_validation import (
+        build_validation_engine,
+        feature_refresh_lock,
+        mark_features_invalid,
+    )
     from ingestion.models import create_all_tables
+
+    if not symbols:
+        raise ValueError("At least one symbol is required for backfill")
+
+    if invalidate_features:
+        # A standalone backfill also changes the source under dbt. Keep it
+        # serialized with Airflow and manual feature publication, and leave
+        # features invalid until a subsequent validated build succeeds.
+        lock_engine = build_validation_engine()
+        try:
+            with feature_refresh_lock(lock_engine):
+                mark_features_invalid(lock_engine, symbols)
+                return run_backfill(
+                    symbols, days=days, interval=interval,
+                    no_incremental=no_incremental, source=source,
+                    invalidate_features=False,
+                )
+        finally:
+            lock_engine.dispose()
 
     load_dotenv()
 
@@ -204,6 +251,7 @@ def run_backfill(
     client = BinanceClientWrapper(testnet=(source == "testnet"))
     conn = _get_db_connection()
     summary: dict[str, dict[str, int]] = {}
+    failed_symbols: list[str] = []
 
     try:
         for symbol in symbols:
@@ -223,12 +271,13 @@ def run_backfill(
                 log.info(
                     "symbol_complete",
                     symbol=symbol,
-                    new_rows=inserted,
+                    changed_rows=inserted,
                     total_in_db=total,
                 )
             except Exception:
                 log.exception("symbol_failed", symbol=symbol)
                 summary[symbol] = {"inserted": -1, "total": -1}
+                failed_symbols.append(symbol)
     finally:
         conn.close()
 
@@ -239,9 +288,12 @@ def run_backfill(
             print(f"  {sym:<15} FAILED")
         else:
             print(
-                f"  {sym:<15} {stats['inserted']:>6} new rows"
+                f"  {sym:<15} {stats['inserted']:>6} inserted/updated rows"
                 f"  |  {stats['total']:>7,} total in DB"
             )
+
+    if failed_symbols:
+        raise RuntimeError(f"Backfill failed for {', '.join(failed_symbols)}")
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +324,7 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Ignore existing data and backfill from now−days, re-inserting "
-             "older bars (safe: ON CONFLICT DO NOTHING; use with --days 180 "
+             "older bars (safe: changed values are updated; use with --days 180 "
              "to extend an existing 90-day dataset backwards)",
     )
     parser.add_argument(

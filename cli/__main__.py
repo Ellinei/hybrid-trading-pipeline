@@ -23,6 +23,7 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import UTC
 
 _SUBCOMMANDS = {
     "backfill": "ingestion.rest_backfill",
@@ -60,12 +61,31 @@ def _run_features(rest: list[str]) -> int:
     failure — the same three-step chain the README documents by hand."""
     if rest:
         print(f"  NOTE: 'features' takes no extra args; ignoring: {rest}")
+    from dotenv import load_dotenv
+
+    from ingestion.feature_validation import (
+        build_validation_engine,
+        feature_refresh_lock,
+        mark_features_invalid,
+        mark_features_valid,
+    )
+
+    load_dotenv()
     env = _dbt_env()
-    for step in ("deps", "run", "test"):
-        result = subprocess.run(["dbt", step, "--profiles-dir", "."], cwd="dbt", env=env)
-        if result.returncode != 0:
-            return result.returncode
-    return 0
+    engine = build_validation_engine()
+    try:
+        with feature_refresh_lock(engine):
+            generation = mark_features_invalid(engine)
+            for step in ("deps", "run", "test"):
+                result = subprocess.run(
+                    ["dbt", step, "--profiles-dir", "."], cwd="dbt", env=env
+                )
+                if result.returncode != 0:
+                    return result.returncode
+            mark_features_valid(engine, generation)
+            return 0
+    finally:
+        engine.dispose()
 
 
 def _parse_experiment_args(rest: list[str]) -> argparse.Namespace:
@@ -87,10 +107,31 @@ def _parse_experiment_args(rest: list[str]) -> argparse.Namespace:
     parser.add_argument("--walk-forward", type=int, default=1, dest="walk_forward_months")
     parser.add_argument("--train-window-days", type=int, default=540)
     parser.add_argument("--output-dir", type=str, default="results")
+    parser.add_argument("--start", type=_parse_utc_datetime, default=None,
+                        help="Evaluation start, inclusive (ISO 8601 with UTC offset)")
+    parser.add_argument("--end", type=_parse_utc_datetime, default=None,
+                        help="Evaluation end, exclusive (ISO 8601 with UTC offset)")
     parser.add_argument("--regime", type=str, default=None, dest="regime_candidate",
                          help="Phase 12 regime candidate key (r1_sma200, r2_hysteresis_cross, "
                               "r3_vol_percentile, r4_composite) or omit to disable the gate")
-    return parser.parse_args(rest)
+    args = parser.parse_args(rest)
+    if (args.start is None) != (args.end is None):
+        parser.error("--start and --end must be supplied together")
+    if args.start is not None and args.start >= args.end:
+        parser.error("--start must be earlier than --end")
+    return args
+
+
+def _parse_utc_datetime(value: str):
+    from datetime import datetime
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected ISO 8601 date-time with UTC offset") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise argparse.ArgumentTypeError("date-time must include a UTC offset")
+    return parsed.astimezone(UTC)
 
 
 def _run_experiment(rest: list[str]) -> int:
@@ -98,11 +139,14 @@ def _run_experiment(rest: list[str]) -> int:
     from backtest.run_backtest import build_engine
 
     args = _parse_experiment_args(rest)
-    engine = build_engine()
     symbols = (
         [s.strip() for s in args.symbols.split(",") if s.strip()]
         if args.symbols else
-        [s.strip() for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
+        [
+            s.strip()
+            for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+            if s.strip()
+        ]
     )
     cfg = ExperimentConfig(
         exp_id=args.exp_id, symbols=symbols,
@@ -112,8 +156,10 @@ def _run_experiment(rest: list[str]) -> int:
         max_hold_bars=args.max_hold_bars, min_train_days=args.min_train_days,
         walk_forward_months=args.walk_forward_months, train_window_days=args.train_window_days,
         output_dir=args.output_dir, regime_candidate=args.regime_candidate,
+        start=args.start, end=args.end,
     )
 
+    engine = build_engine()
     metrics = run_experiment(engine, cfg)
     engine.dispose()
 

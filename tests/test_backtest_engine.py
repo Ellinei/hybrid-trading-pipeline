@@ -7,11 +7,10 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pandas as pd
-import pytest
 
 from backtest.engine import BacktestConfig, run_backtest
 from backtest.exit_simulation import OHLCVBar
@@ -32,14 +31,14 @@ class _FakeAggregator:
         confidence = 0.9 if first_call else 0.5
         return AggregatedSignal(
             direction=direction, confidence=confidence, symbol=symbol,
-            timestamp=as_of or datetime.now(timezone.utc),
+            timestamp=as_of or datetime.now(UTC),
             signals=[Signal(direction, confidence, "technical", symbol, as_of)],
             reasoning="fake", weights_used={},
         )
 
 
 def _bars(closes_highs_lows, start=None):
-    start = start or datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = start or datetime(2026, 1, 1, tzinfo=UTC)
     bars = []
     for i, (close, high, low) in enumerate(closes_highs_lows):
         ts = start + timedelta(hours=i)
@@ -89,17 +88,21 @@ class TestRunBacktestMultiSymbolChronologicalOrder:
         symbol-outer loop would process all of AAA first then all of BBB,
         producing equity_curve timestamps [t4, t1.5] — backwards. Bars must
         be processed in one global, timestamp-sorted stream instead."""
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
 
         aaa_bars = [
-            OHLCVBar(timestamp=start + timedelta(hours=h), open=100.0, high=101.0, low=99.0, close=100.0)
+            OHLCVBar(timestamp=start + timedelta(hours=h),
+                     open=100.0, high=101.0, low=99.0, close=100.0)
             for h in range(4)
         ] + [
-            OHLCVBar(timestamp=start + timedelta(hours=4), open=100.0, high=101.0, low=90.0, close=92.0),
+            OHLCVBar(timestamp=start + timedelta(hours=4),
+                     open=100.0, high=101.0, low=90.0, close=92.0),
         ]
         bbb_bars = [
-            OHLCVBar(timestamp=start + timedelta(hours=0.5), open=100.0, high=101.0, low=99.0, close=100.0),
-            OHLCVBar(timestamp=start + timedelta(hours=1.5), open=100.0, high=101.0, low=85.0, close=92.0),
+            OHLCVBar(timestamp=start + timedelta(hours=0.5),
+                     open=100.0, high=101.0, low=99.0, close=100.0),
+            OHLCVBar(timestamp=start + timedelta(hours=1.5),
+                     open=100.0, high=101.0, low=85.0, close=92.0),
         ]
 
         config = BacktestConfig(
@@ -129,8 +132,8 @@ class TestRunBacktestMultiSymbolChronologicalOrder:
     def test_no_data_for_symbol_produces_no_trades(self):
         config = BacktestConfig(
             symbols=["ETHUSDT"],
-            start=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            end=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+            end=datetime(2026, 1, 2, tzinfo=UTC),
         )
         result = run_backtest(
             bars_by_symbol={}, atr_by_symbol={}, filters_by_symbol={},
@@ -217,7 +220,7 @@ class _HoldAggregatorWithML:
     def aggregate(self, symbol: str, as_of=None) -> AggregatedSignal:
         return AggregatedSignal(
             direction=SignalDirection.HOLD, confidence=0.5, symbol=symbol,
-            timestamp=as_of or datetime.now(timezone.utc),
+            timestamp=as_of or datetime.now(UTC),
             signals=[], reasoning="hold", weights_used={},
         )
 
@@ -227,7 +230,7 @@ class TestWalkForwardMode:
     def test_walk_forward_retraining_boundary_calls_train_walk_forward(self):
         """With 91 bars at 1-day intervals, 30-day warm-up, monthly retraining:
         train_walk_forward fires at day-30 and day-60 boundaries (≥ 2 calls)."""
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
         bars = [
             OHLCVBar(
                 timestamp=start + timedelta(days=d),
@@ -271,7 +274,7 @@ class TestWalkForwardMode:
         from signals.ml_model import MLSignalGenerator
 
         horizon = MLSignalGenerator.LABEL_HORIZON_BARS
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
         bars = [
             OHLCVBar(timestamp=start + timedelta(hours=h),
                      open=100.0, high=101.0, low=99.0, close=100.0)
@@ -309,7 +312,7 @@ class TestWalkForwardMode:
         from signals.ml_model import MLSignalGenerator
 
         horizon = MLSignalGenerator.LABEL_HORIZON_BARS
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
         bars = [
             OHLCVBar(timestamp=start + timedelta(hours=h),
                      open=100.0, high=101.0, low=99.0, close=100.0)
@@ -361,7 +364,7 @@ class TestWalkForwardMode:
 
     def test_walk_forward_warning_replaces_lookahead_warning(self):
         """Walk-forward result carries an OOS warning, not the in-sample warning."""
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
         bars = [
             OHLCVBar(timestamp=start + timedelta(hours=h),
                      open=100.0, high=101.0, low=99.0, close=100.0)
@@ -402,7 +405,7 @@ class TestWalkForwardMode:
 
         from signals.ml_model import MLSignalGenerator
 
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
         n_rows = 33 * 24  # 33 days hourly: forces 2 retrain boundaries
         bars = [
             OHLCVBar(timestamp=start + timedelta(hours=h),

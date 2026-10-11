@@ -1,0 +1,48 @@
+{
+  "as_of": "2026-09-25T00:00:00+00:00",
+  "train_window_days": 540,
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT"
+  ],
+  "feature_schema": [
+    "rsi_14_proxy",
+    "macd_line",
+    "bb_zscore",
+    "pct_change_1h",
+    "pct_change_24h",
+    "log_return_1h",
+    "range_14",
+    "volume",
+    "log_return_7d",
+    "pct_change_4h",
+    "close_vs_sma20",
+    "close_vs_sma50",
+    "bb_width",
+    "atr_normalized",
+    "vol_ma_ratio",
+    "candle_body_pct",
+    "upper_wick_pct",
+    "stoch_k"
+  ],
+  "label_horizon_bars": 8,
+  "label_min_return": 0.003,
+  "chosen_params": {
+    "learning_rate": 0.05,
+    "max_depth": 3,
+    "n_estimators": 100
+  },
+  "parameter_mode": "frozen",
+  "data_fingerprint_sha256": "a821fdffa4e5a6923b5b0ef6dab5d52dbd1c90a500d2ecde33cc1acf32a81aeb",
+  "source_revision": "8969efb843a086be5cf8b413bdd8eaa9e3d894af",
+  "source_file_sha256": "fc7260b2fccde90da88212ea6f3f2fd50ce7825b906d19434db0f5c3471cca54",
+  "source_dirty": false,
+  "model_sha256": "56eb6952ae2a037ba3d03dd4cb6b169a2a94a1d8e87e097fafe74f3dd8f28477",
+  "scaler_sha256": "bcfb20661a3e5713428d43beeb3e0ce796a7cfe4200358e62cc7f957ef302f1c",
+  "train_rows": 31059,
+  "validation_rows": 7773,
+  "validation_start": "2026-06-08T17:00:00+00:00",
+  "training_last_label_open_timestamp": "2026-06-08T16:00:00+00:00",
+  "training_last_label_reveal_timestamp": "2026-06-08T17:00:00+00:00"
+}

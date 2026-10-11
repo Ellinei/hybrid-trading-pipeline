@@ -7,12 +7,11 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -118,7 +117,7 @@ class TestGetAccountBalance:
         MockClient.return_value.get_asset_balance.side_effect = Exception("timeout")
 
         from ingestion.binance_client import BinanceClientWrapper
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="timeout"):
             BinanceClientWrapper().get_account_balance("USDT")
 
     @patch("ingestion.binance_client.Client")
@@ -223,9 +222,25 @@ class TestFetchOHLCV:
         assert isinstance(df, pd.DataFrame)
         assert df.empty
 
+    @patch("ingestion.binance_client.Client")
+    def test_only_completed_candles_crossing_hour_boundary(self, MockClient):
+        from ingestion.binance_client import BinanceClientWrapper
+
+        MockClient.return_value.get_historical_klines.return_value = _MOCK_KLINES
+        wrapper = BinanceClientWrapper()
+        at_boundary = datetime(2021, 1, 1, 1, tzinfo=UTC)
+        df = wrapper.fetch_ohlcv("BTCUSDT", as_of=at_boundary)
+        assert list(df["close"]) == [29300.0]
+        assert wrapper.fetch_ohlcv(
+            "BTCUSDT", as_of=at_boundary + timedelta(minutes=59, seconds=59)
+        )["close"].tolist() == [29300.0]
+        assert wrapper.fetch_ohlcv(
+            "BTCUSDT", as_of=at_boundary + timedelta(hours=1)
+        )["close"].tolist() == [29300.0, 29600.0]
+
 
 # ===========================================================================
-# 3. upsert_ohlcv_rows — idempotency via ON CONFLICT DO NOTHING
+# 3. upsert_ohlcv_rows — idempotency and provisional-row repair
 # ===========================================================================
 
 class TestBackfillIdempotency:
@@ -233,17 +248,20 @@ class TestBackfillIdempotency:
 
     _ROW = {
         "symbol": "BTCUSDT",
-        "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+        "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
         "open": 42_000.0, "high": 43_000.0, "low": 41_000.0,
         "close": 42_500.0, "volume": 10.5,
         "quote_volume": 441_000.0, "trades": 500, "taker_buy_vol": 5.25,
     }
 
-    def test_insert_sql_contains_on_conflict_do_nothing(self):
+    def test_insert_sql_repairs_conflicting_candle_values(self):
         from ingestion.rest_backfill import OHLCV_INSERT_SQL
 
         assert "ON CONFLICT" in OHLCV_INSERT_SQL
-        assert "DO NOTHING" in OHLCV_INSERT_SQL
+        assert "DO UPDATE SET" in OHLCV_INSERT_SQL
+        for column in ("open", "high", "low", "close", "volume",
+                       "quote_volume", "trades", "taker_buy_vol"):
+            assert f"{column} = EXCLUDED.{column}" in OHLCV_INSERT_SQL
 
     def test_calling_upsert_twice_invokes_execute_values_twice(self):
         from ingestion.rest_backfill import upsert_ohlcv_rows
@@ -266,6 +284,157 @@ class TestBackfillIdempotency:
 
             mock_ev.assert_not_called()
             assert result == 0
+
+
+class TestIncrementalRepair:
+    def test_overlap_refetches_latest_and_gaps_and_stops_at_fixed_snapshot(self):
+        from ingestion.rest_backfill import backfill_symbol
+
+        now = datetime(2024, 1, 3, 3, tzinfo=UTC)
+        latest = datetime(2024, 1, 3, 1, tzinfo=UTC)
+        client = MagicMock()
+        client.fetch_ohlcv.return_value = pd.DataFrame({
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": pd.to_datetime([
+                "2024-01-03T00:00:00Z", "2024-01-03T01:00:00Z"
+            ]),
+            "close": [42.0, 43.0],
+        })
+        with patch("ingestion.rest_backfill._get_latest_timestamp", return_value=latest), patch(
+            "ingestion.rest_backfill.upsert_ohlcv_rows", return_value=2
+        ) as upsert:
+            assert backfill_symbol(MagicMock(), client, "BTCUSDT", now=now) == 2
+        assert client.fetch_ohlcv.call_args.kwargs["start_date"] <= now - timedelta(hours=48)
+        assert client.fetch_ohlcv.call_args.kwargs["end_date"] == now
+        assert [r["close"] for r in upsert.call_args.args[1]] == [42.0, 43.0]
+
+    def test_delayed_exchange_candle_is_picked_up_on_next_run(self):
+        from ingestion.rest_backfill import backfill_symbol
+
+        now = datetime(2024, 1, 3, 3, tzinfo=UTC)
+        latest = datetime(2024, 1, 3, 1, tzinfo=UTC)
+        client = MagicMock()
+        client.fetch_ohlcv.side_effect = [
+            pd.DataFrame(),
+            pd.DataFrame({
+                "symbol": ["BTCUSDT"],
+                "timestamp": pd.to_datetime(["2024-01-03T02:00:00Z"]),
+                "close": [44.0],
+            }),
+        ]
+        with patch("ingestion.rest_backfill._get_latest_timestamp", return_value=latest), patch(
+            "ingestion.rest_backfill.upsert_ohlcv_rows", return_value=1
+        ) as upsert:
+            assert backfill_symbol(MagicMock(), client, "BTCUSDT", now=now) == 0
+            assert backfill_symbol(MagicMock(), client, "BTCUSDT", now=now) == 1
+        assert client.fetch_ohlcv.call_args_list[0].kwargs["start_date"] == (
+            client.fetch_ohlcv.call_args_list[1].kwargs["start_date"]
+        )
+        assert upsert.call_args.args[1][0]["close"] == 44.0
+
+    def test_nonadvancing_full_batch_fails_instead_of_looping(self):
+        from ingestion.rest_backfill import backfill_symbol
+
+        now = datetime(2024, 1, 3, 3, tzinfo=UTC)
+        latest = datetime(2024, 1, 3, 1, tzinfo=UTC)
+        client = MagicMock()
+        client.fetch_ohlcv.return_value = pd.DataFrame({
+            "timestamp": pd.to_datetime(["2024-01-01T00:00:00Z"] * 1000),
+        })
+        with patch("ingestion.rest_backfill._get_latest_timestamp", return_value=latest), patch(
+            "ingestion.rest_backfill.upsert_ohlcv_rows", return_value=0
+        ):
+            with pytest.raises(RuntimeError, match="advance"):
+                backfill_symbol(MagicMock(), client, "BTCUSDT", now=now)
+
+
+class TestBackfillFailure:
+    @pytest.fixture(autouse=True)
+    def _block_real_db_connections(self):
+        """run_backfill's default invalidate_features=True path builds a
+        real engine via ingestion.feature_validation.build_validation_engine
+        and locks/writes through it before any of the mocks below patch it
+        out. Every test in this class must mock that path explicitly; this
+        is a backstop so a hole that misses one of those patches fails
+        loudly and immediately (AssertionError) instead of silently trying
+        a real network connection to Postgres and hanging/erroring on
+        auth — see the module docstring's "no real API calls or DB
+        connections" guarantee."""
+        with patch("psycopg2.connect", side_effect=AssertionError(
+            "TestBackfillFailure must not open a real DB connection"
+        )):
+            yield
+
+    def test_manual_backfill_invalidates_under_refresh_lock(self):
+        from contextlib import contextmanager
+
+        from ingestion.rest_backfill import run_backfill
+
+        events = []
+        engine = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (1,)
+
+        @contextmanager
+        def locked(_engine):
+            events.append("lock")
+            try:
+                yield
+            finally:
+                events.append("unlock")
+
+        def invalid(_engine, symbols):
+            assert symbols == ["BTCUSDT"]
+            events.append("invalid")
+
+        def backfill(*_args, **_kwargs):
+            events.append("backfill")
+            return 0
+
+        with patch("ingestion.feature_validation.build_validation_engine", return_value=engine), \
+             patch("ingestion.feature_validation.feature_refresh_lock", locked), \
+             patch("ingestion.feature_validation.mark_features_invalid", invalid), \
+             patch("ingestion.models.create_all_tables"), \
+             patch("sqlalchemy.create_engine", return_value=MagicMock()), \
+             patch("ingestion.binance_client.BinanceClientWrapper"), \
+             patch("ingestion.rest_backfill._get_db_connection", return_value=conn), \
+             patch("ingestion.rest_backfill.backfill_symbol", backfill):
+            run_backfill(["BTCUSDT"])
+
+        assert events == ["lock", "invalid", "backfill", "unlock"]
+        engine.dispose.assert_called_once()
+
+    def test_empty_symbol_list_cannot_report_success(self):
+        from ingestion.rest_backfill import run_backfill
+
+        with patch("ingestion.models.create_all_tables"), patch(
+            "sqlalchemy.create_engine"
+        ), patch("ingestion.binance_client.BinanceClientWrapper"), patch(
+            "ingestion.rest_backfill._get_db_connection"
+        ):
+            with pytest.raises(ValueError, match="symbol"):
+                run_backfill([])
+
+    def test_symbol_failure_propagates_after_summary(self):
+        from ingestion.rest_backfill import run_backfill
+
+        # run_backfill's default invalidate_features=True path goes through
+        # ingestion.feature_validation.build_validation_engine ->
+        # feature_refresh_lock -> mark_features_invalid before ever reaching
+        # backfill_symbol. Those three must be mocked here too, or this
+        # test opens a real engine/connection against whatever POSTGRES_*
+        # the _test_env fixture set, same hole as the test above.
+        with patch("ingestion.feature_validation.build_validation_engine",
+                   return_value=MagicMock()), \
+             patch("ingestion.feature_validation.feature_refresh_lock"), \
+             patch("ingestion.feature_validation.mark_features_invalid"), \
+             patch("ingestion.models.create_all_tables"), patch(
+            "sqlalchemy.create_engine"
+        ), patch("ingestion.binance_client.BinanceClientWrapper"), patch(
+            "ingestion.rest_backfill._get_db_connection"
+        ), patch("ingestion.rest_backfill.backfill_symbol", side_effect=RuntimeError("API failed")):
+            with pytest.raises(RuntimeError, match="BTCUSDT"):
+                run_backfill(["BTCUSDT"])
 
 
 # ===========================================================================

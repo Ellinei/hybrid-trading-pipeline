@@ -5,7 +5,7 @@ All thresholds come from standard technical analysis literature.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import text
@@ -139,7 +139,7 @@ class TechnicalSignalGenerator:
 
     def generate_signal(self, symbol: str, as_of: datetime | None = None) -> Signal:
         """Apply rule set and return a Signal."""
-        now = as_of if as_of is not None else datetime.now(timezone.utc)
+        now = as_of if as_of is not None else datetime.now(UTC)
         features = self.get_latest_features(symbol, as_of=as_of)
 
         if not features:

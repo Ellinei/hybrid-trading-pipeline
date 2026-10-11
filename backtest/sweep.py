@@ -20,7 +20,7 @@ import argparse
 import csv
 import itertools
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import quote_plus
 
 import structlog
@@ -64,7 +64,7 @@ def _grid_configs(grid: dict[str, list] | None = None) -> list[RiskConfig]:
     g = grid if grid is not None else PARAM_GRID
     keys = list(g.keys())
     combos = itertools.product(*[g[k] for k in keys])
-    return [RiskConfig(**dict(zip(keys, combo))) for combo in combos]
+    return [RiskConfig(**dict(zip(keys, combo, strict=False))) for combo in combos]
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +235,14 @@ def main() -> None:
     symbols = (
         [s.strip() for s in args.symbols.split(",") if s.strip()]
         if args.symbols else
-        [s.strip() for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
+        [
+            s.strip()
+            for s in os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+            if s.strip()
+        ]
     )
-    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc) if args.start else None
-    end   = datetime.fromisoformat(args.end  ).replace(tzinfo=timezone.utc) if args.end   else None
+    start = datetime.fromisoformat(args.start).replace(tzinfo=UTC) if args.start else None
+    end   = datetime.fromisoformat(args.end  ).replace(tzinfo=UTC) if args.end   else None
 
     # 1. Load raw market data (bars, ATR, exchange filters) — one trip to DB per symbol
     print(f"Loading market data for {symbols}…", flush=True)
@@ -274,8 +278,8 @@ def main() -> None:
     for i, rc in enumerate(configs, 1):
         cfg = BacktestConfig(
             symbols=symbols,
-            start=start or datetime(1970, 1, 1, tzinfo=timezone.utc),
-            end=end   or datetime.now(timezone.utc),
+            start=start or datetime(1970, 1, 1, tzinfo=UTC),
+            end=end   or datetime.now(UTC),
             risk_config=rc,
         )
         result = run_backtest(

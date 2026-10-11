@@ -10,7 +10,7 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -23,7 +23,7 @@ from backtest.report import (
 
 
 def _dt(y, m, d=1):
-    return datetime(y, m, d, tzinfo=timezone.utc)
+    return datetime(y, m, d, tzinfo=UTC)
 
 
 class TestMonthlyWindows:
