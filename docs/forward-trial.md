@@ -185,3 +185,50 @@ discarded, and its first attempt, made right after the scheduler started,
 never registered, so the script waited out its timeout. That run's bot still
 started on published data. The script now retries the trigger until the run
 is registered and prints the error otherwise; the second test passed.
+
+## Host move to an AWS VM (2026-10-14)
+
+To reach 168 heartbeat-hours without leaving the PC on, the trial moved for
+about one week to an AWS EC2 VM: `c7i-flex.large`, Ubuntu 24.04, x86_64,
+`ap-southeast-1`, instance `i-06bbeead16b68a793`. Teardown is planned around
+2026-10-21, after the account and database are copied back. Model, strategy
+and account are unchanged, so this is the same trial on a different host,
+from Windows to Linux.
+
+- **Downtime:** the bot was down from the last Windows heartbeat
+  (2026-10-13 19:33 UTC) to the first VM heartbeat (2026-10-14 13:17 UTC).
+  The gap is reported, not reconstructed.
+- **State moved:**
+  - The Postgres volume moved as a tarball of the stopped volume, restored
+    with the same image digest. Row counts and the heartbeat count matched
+    before and after.
+  - The account moved as `results/forward_20260924.sqlite3`. Its WAL was
+    checkpointed first, because the Windows bot had stopped without a clean
+    close and 60 decisions were still in the `-wal` file. The decision
+    counts matched afterwards: hold 23, rejected 40.
+- **Code and model:**
+  - Code is at `75a5102`.
+  - Python is 3.13.2, with packages from the Windows venv's `pip freeze`
+    (scikit-learn 1.9.1, xgboost 2.1.4).
+  - The model `.pkl` files match `SHA256SUMS`. `metadata.json` matches in
+    its CRLF form.
+  - Probabilities on fixed inputs are bit-identical on both hosts.
+- **Linux runtime:**
+  - systemd unit `trial-bot.service` runs the same command and appends to
+    the same `bot.log` and `sessions.log`. It restarts on failure after
+    60 s.
+  - A VM-only compose override binds Postgres to `127.0.0.1` and restarts
+    the services on reboot.
+  - The security group allows only SSH from the owner's IP.
+- **Linux-only fix:** `dbt/` needed a write ACL for the container user
+  (uid 50000). Without it, `dbt deps` exited 2 and the first catch-up run
+  `scheduled__2026-10-14T11:05` failed.
+- **First VM cycle:** 20/168 hours, 22 cycles, 0 errors, cash 10,000.00.
+- **No second bot:** the Windows account file was renamed to
+  `forward_20260924.sqlite3.MOVED-TO-AWS-2026-10-14`, so
+  `scripts\trial_start.ps1` refuses to start on the PC.
+- From this point the evidence validates the VM deployment, not the Windows
+  launcher.
+- **Log timestamps:** `bot.log` timestamps are local time. Windows lines are
+  UTC+7, and VM lines (from 2026-10-14 13:17) are UTC. Heartbeats in
+  Postgres are always UTC.

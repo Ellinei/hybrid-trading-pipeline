@@ -61,3 +61,7 @@ cache/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Local experiment outputs, trial logs and data backups (kept on disk, never committed)
+backups/
+results/
