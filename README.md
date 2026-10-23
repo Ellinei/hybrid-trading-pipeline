@@ -7,6 +7,13 @@
 ![Python](https://img.shields.io/badge/python-3.13-blue)
 See the latest verification record in [the implementation log](log/phase13-implementation-progress.md).
 
+## Project Status
+
+The pipeline, evaluation harness, and paper-trading operations are complete. The trading strategy has **no proven edge**.
+
+- **Historical result:** the corrected causal baseline (`exp008_corrected_20260925`) made 75 trades with profit factor 1.89. It fails the pre-registered gate of at least 100 trades, and its profit factor moves between 1.18 and 1.89 depending on one learning-rate setting (0.1 vs 0.05). See [the experiment ledger](docs/experiments.md).
+- **Paper trial:** an operations-only trial logged 192 heartbeat-hours and 194 hourly cycles with 0 cycle errors, first on a Windows PC and then on an AWS VM. It opened no trades, so it gives no performance evidence. A deliberate stale-data test blocked new entries while SELL signals were still evaluated. See [the trial record](docs/forward-trial.md).
+
 ## Architecture Overview
 
 See [docs/architecture.md](docs/architecture.md) for the full system diagram and design decisions.
@@ -30,7 +37,7 @@ Execution supports Binance entries and protective **OCO (One-Cancels-Other) orde
 | Transformations | **dbt** — staging → intermediate → features; versions pinned in Poetry and the Airflow image |
 | Storage | **PostgreSQL 15 + TimescaleDB** (hypertables) |
 | ML model | **XGBoost** (8-bar return above a 0.3% hurdle, 18 features) |
-| Sentiment | **VADER + public RSS** (CoinDesk, Cointelegraph, CryptoPanic) |
+| Sentiment | **VADER + public RSS** (CoinDesk, Cointelegraph, CryptoPanic); optional, disabled in the adopted strategy |
 | Execution | **Binance OCO orders** — stop-loss + take-profit on entry |
 | Backtesting | Custom engine + 192-combo parameter sweep |
 | Monitoring | **Streamlit** dashboard |
@@ -189,11 +196,11 @@ hybrid-trading-pipeline/
 - [x] **Phase 8.7** — XGBoost hyperparameter tuning via GridSearchCV + TimeSeriesSplit; fine-grained 72-combo stop-loss sweep; first profitable backtest configs found (PF 1.19, +0.37% return at SL=1.0xATR, conf>=0.62, size=1.5%)
 - [x] **Phase 9** — Rolling walk-forward retraining and chronological replay
 - [x] **Phase 10–11** — Experiment ledger, probability caching, CLI experiments, reports, and parity checks
-- [x] **Phase 12** — Macro regime candidates and historical exp008 evaluation; its recorded acceptance requires reassessment after correcting daily timing
-- [ ] **Phase 13** — Complete causal evaluation, reproducible training, hourly data refresh, and a documented paper trial; operations features are implemented, forward evidence remains outstanding
-- [ ] **Testnet execution milestone** — Evaluate readiness after corrected historical and forward results
+- [x] **Phase 12** — Macro regime candidates and historical exp008 evaluation; exp008's acceptance did not survive the corrected causal re-run (75 trades, below the 100-trade gate)
+- [x] **Phase 13** — Causal evaluation, reproducible training, hourly data refresh, and an operations-only paper trial (192 heartbeat-hours, 0 cycle errors, 0 trades; performance inconclusive)
+- [ ] **Testnet execution milestone** — On hold: the corrected historical result fails its gate and the paper trial produced no trades
 
-See [the current next-move plan](docs/next-move-2026-09-23.md) and
+See [the September 2026 next-move plan](docs/next-move-2026-09-23.md) and
 [implementation progress](log/phase13-implementation-progress.md). Earlier phase
 metrics above are historical records, not current validation claims.
 
